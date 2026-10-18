@@ -466,6 +466,82 @@ static void jevin_telemetry_ground(
 	console_printf(FALSE, "JEVIN gend");
 }
 
+/* the ground around a unit as a grid, in one console call.
+
+A single probe ahead answers "is there a step here", and that is not enough: a
+bridge is narrow, a ledge can run diagonally across the line of travel, and two
+separate probes can both read safe across a gap between them. All of that is
+what a body walks off. Sampling a square of points in one call gives the
+controller the local *shape* of the ground for the price of one round trip.
+
+	jevin_grid <unit> <spacing> <count> [drop]
+
+`count` is the radius in cells, so a count of 3 is a 7 by 7 grid. Offsets are in
+cells from the unit. `drop` is measured from 1.5 units above the unit down, so
+ground a step up is still found:
+
+	JEVIN g <i> <j> hit|none <drop> <inside> <water> <same cluster>
+	JEVIN gend
+*/
+static void jevin_telemetry_grid(
+	long index,
+	real spacing,
+	long count,
+	real drop)
+{
+	struct object_datum *object = object_try_and_get(index);
+	struct collision_result collision;
+	struct location probe_location;
+	real_vector3d down;
+	real_point3d point;
+	/* structure and objects both: a biped can stand on a crate or a crashed
+	pod, which are object collision models rather than the structure */
+	unsigned long flags = (1UL << _collision_test_structure_bit) |
+		(1UL << _collision_test_objects_bit);
+	long i, j;
+	short own_cluster;
+
+	if (object == NULL)
+	{
+		console_printf(FALSE, "JEVIN grid missing %ld", index);
+		console_printf(FALSE, "JEVIN gend");
+		return;
+	}
+	if (spacing <= 0.0f)
+		spacing = 1.0f;
+	if (count < 1)
+		count = 1;
+	if (count > 6)
+		count = 6;                          /* the dump has to stay cheap */
+	if (drop <= 0.0f)
+		drop = 8.0f;
+	own_cluster = object->object.location.cluster_index;
+	down.n[0] = 0.0f;
+	down.n[1] = 0.0f;
+	down.n[2] = -drop;
+
+	for (i = -count; i <= count; i++)
+	{
+		for (j = -count; j <= count; j++)
+		{
+			boolean found;
+
+			point.n[0] = object->object.position.n[0] + (real)i * spacing;
+			point.n[1] = object->object.position.n[1] + (real)j * spacing;
+			point.n[2] = object->object.position.n[2] + 1.5f;
+			scenario_location_from_point(&probe_location, &point);
+			found = collision_test_vector(flags, &point, &down, index, &collision) != FALSE;
+			console_printf(FALSE, "JEVIN g %ld %ld %s %.3f %d %d %d",
+				i, j, found ? "hit" : "none",
+				(double)(found ? collision.t * drop : drop),
+				(int)(probe_location.cluster_index != NONE),
+				(int)scenario_location_underwater(&probe_location, &point, NULL),
+				(int)(probe_location.cluster_index == own_cluster));
+		}
+	}
+	console_printf(FALSE, "JEVIN gend");
+}
+
 /* the same ledge test, but from a point offset in world space rather than
 along the object's facing. A body does not only move where it looks: it can
 strafe, and it has width, so the probe has to be able to test sideways and to
@@ -1195,6 +1271,7 @@ static void jevin_remote_apply(
 	void)
 {
 	struct object_datum *object;
+	real magnitude;
 
 	if (jevin_remote_unit == NONE)
 		return;
@@ -1203,6 +1280,23 @@ static void jevin_remote_apply(
 	{
 		jevin_remote_unit = NONE;
 		return;
+	}
+	/* The engine asserts that a unit's control throttle is at most 3, and a
+	normalised direction multiplied by a speed of 3 lands a hair over it in
+	single precision: that assert (units.c, "magnitude3d(&control_data->
+	throttle)<=3.0f") took the whole game down at the end of two sessions. Clamp
+	below the limit here, at the one place where every command hands control
+	over, rather than trusting each caller to leave a margin. */
+	magnitude = (real)sqrt((double)(jevin_remote_control.throttle.n[0] * jevin_remote_control.throttle.n[0] +
+		jevin_remote_control.throttle.n[1] * jevin_remote_control.throttle.n[1] +
+		jevin_remote_control.throttle.n[2] * jevin_remote_control.throttle.n[2]));
+	if (magnitude > 2.9f)
+	{
+		real scale = 2.9f / magnitude;
+
+		jevin_remote_control.throttle.n[0] *= scale;
+		jevin_remote_control.throttle.n[1] *= scale;
+		jevin_remote_control.throttle.n[2] *= scale;
 	}
 	unit_control(jevin_remote_unit, &jevin_remote_control);
 }
@@ -1649,6 +1743,23 @@ boolean jevin_console_command(
 		}
 		else
 			console_printf(FALSE, "JEVIN: jevin_probe <object> <dx> <dy> [length] [height]");
+		return TRUE;
+	}
+	if ((rest = jevin_telemetry_word(expression, "jevin_grid")) != NULL)
+	{
+		long index = NONE;
+		real spacing = 1.0f;
+		long count = 3;
+		real drop = 8.0f;
+
+		if (jevin_telemetry_long(&rest, &index) && jevin_telemetry_real(&rest, &spacing) &&
+			jevin_telemetry_long(&rest, &count))
+		{
+			jevin_telemetry_real(&rest, &drop);
+			jevin_telemetry_grid(index, spacing, count, drop);
+		}
+		else
+			console_printf(FALSE, "JEVIN: jevin_grid <unit> <spacing> <count> [drop]");
 		return TRUE;
 	}
 	if ((rest = jevin_telemetry_word(expression, "jevin_ray")) != NULL)

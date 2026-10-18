@@ -33,6 +33,7 @@ does its own geometry, which keeps this a dump rather than a query.
 
 #include "cseries.h"
 #include "ai/ai_scenario_definitions.h"
+#include "ai/path.h"
 #include "game/players.h"
 #include "game/game.h"
 #include "items/weapons.h"
@@ -645,6 +646,116 @@ static void jevin_telemetry_meshinfo(
 		collision_bsp->surfaces.count,
 		structure->surfaces.count,
 		surface, bsp_index, (long)collision.type, collision.object_index, value);
+}
+
+/* ---------- the map's own route ---------- */
+
+/* The collision surface under a point, and the point itself moved down onto it.
+
+The same downward ray as the grid, but what is wanted is the surface index: the
+map's pathfinding flags are one byte per collision surface, so a surface is what
+both the walkability test and the engine's path search take. NONE means the ray
+found nothing, or stopped on an object - an object's surface is in no navmesh. */
+static long jevin_surface_under(
+	struct structure_bsp *structure,
+	real_point3d *point)
+{
+	struct collision_result collision;
+	real_vector3d down;
+	real_point3d from;
+	unsigned long flags = (1UL << _collision_test_structure_bit);
+
+	if (structure == NULL)
+		return NONE;
+	from = *point;
+	from.n[2] += 0.9f;
+	down.n[0] = 0.0f;
+	down.n[1] = 0.0f;
+	down.n[2] = -8.0f;
+	if (!collision_test_vector(flags, &from, &down, NONE, &collision))
+		return NONE;
+	if (collision.type != _collision_result_structure)
+		return NONE;
+	if (!VALID_INDEX(collision.surface_index,
+		structure->pathfinding_surfaces.count))
+		return NONE;
+	point->n[2] = from.n[2] - collision.t * 8.0f;
+	return collision.surface_index;
+}
+
+/* A route over the map's own walkable mesh.
+
+`path_state_find` is the engine's A* over the collision surfaces, stepping only
+between surfaces whose pathfinding flags say walkable (path.c reads the same
+`pathfinding_surfaces` array the grid does). This is the thing the grid can
+never be: it knows *connectivity*, so it can tell that the rock between him and
+the player is walked around rather than through, and that a ledge with no way
+back up is a one way trip - which is what a jump has to be checked against,
+since a jump's landing point has to be a surface he can stand on and only the
+mesh knows where the reachable ones are.
+
+Nothing is moved and no AI path state is touched: the state is static and used
+only here.
+
+	jevin_route <unit> <x> <y> <z>
+	JEVIN route <found> <steps> <x> <y> <z> <x> <y> <z> ...
+*/
+static void jevin_telemetry_route(
+	long index,
+	real x, real y, real z)
+{
+	struct object_datum *object = object_try_and_get(index);
+	struct structure_bsp *structure = global_structure_bsp_get();
+	struct path_input input;
+	struct path_result result;
+	/* 82 kB: a third of a thread's stack would go on this, and there is no
+	reason to build it twice */
+	static struct path_state state;
+	real_point3d here;
+	real_point3d goal;
+	long start_surface;
+	long end_surface;
+	long step;
+
+	if (object == NULL || structure == NULL)
+	{
+		jevin_printf_quiet("JEVIN route unavailable");
+		return;
+	}
+	here = object->object.position;
+	goal.n[0] = x;
+	goal.n[1] = y;
+	goal.n[2] = z;
+	start_surface = jevin_surface_under(structure, &here);
+	end_surface = jevin_surface_under(structure, &goal);
+	if (start_surface == NONE || end_surface == NONE)
+	{
+		jevin_printf_quiet("JEVIN route 0 0 nosurface %ld %ld",
+			start_surface, end_surface);
+		return;
+	}
+	/* a biped's width, so the search cannot squeeze him through a gap the
+	engine would then refuse to walk him through */
+	path_input_new(&input, 0.35f, TRUE, index);
+	path_input_set_start(&input, &here, start_surface);
+	path_state_new(&input, &state, NULL);
+	path_state_destination(&state, &goal, end_surface, 1.0f);
+	if (!path_state_find(&state) || !path_state_build_path(&state, &result))
+	{
+		jevin_printf_quiet("JEVIN route 0 0 no_path %ld %ld %.3f",
+			start_surface, end_surface, (double)state.closest_distance);
+		return;
+	}
+	jevin_printf_quiet("JEVIN route 1 %d %ld %ld",
+		(int)result.step_count, start_surface, end_surface);
+	for (step = 0; step < (long)result.step_count && step < 4; step++)
+	{
+		jevin_printf_quiet("JEVIN rstep %ld %.3f %.3f %.3f",
+			step,
+			(double)result.steps[step].point.n[0],
+			(double)result.steps[step].point.n[1],
+			(double)result.steps[step].point.n[2]);
+	}
 }
 
 /* the ground around a unit as a grid, in one console call.
@@ -2501,6 +2612,18 @@ boolean jevin_console_command(
 			jevin_telemetry_health(index, body, shield);
 		else
 			console_printf(FALSE, "JEVIN: jevin_health <object> <body> <shield>");
+		return TRUE;
+	}
+	if ((rest = jevin_telemetry_word(expression, "jevin_route")) != NULL)
+	{
+		long index = NONE;
+		real x = 0.0f, y = 0.0f, z = 0.0f;
+
+		if (jevin_telemetry_long(&rest, &index) && jevin_telemetry_real(&rest, &x) &&
+			jevin_telemetry_real(&rest, &y) && jevin_telemetry_real(&rest, &z))
+			jevin_telemetry_route(index, x, y, z);
+		else
+			console_printf(FALSE, "JEVIN: jevin_route <unit> <x> <y> <z>");
 		return TRUE;
 	}
 	if ((rest = jevin_telemetry_word(expression, "jevin_vitals")) != NULL)

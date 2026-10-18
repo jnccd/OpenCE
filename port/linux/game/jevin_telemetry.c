@@ -104,6 +104,12 @@ static void jevin_printf_quiet(
 
 /* ---------- helpers */
 
+/* the order ring, defined with the commands further down. `pos` puts its answer
+there too, so a coordinate typed in the game also reaches the process running the
+harness - otherwise it exists only on the screen. */
+static void jevin_telemetry_order(
+	char const *text);
+
 /* what follows the command word an expression starts with (past spaces and
 an opening parenthesis, as the console and init.txt give it), else NULL */
 static char const *jevin_telemetry_word(
@@ -288,6 +294,23 @@ static void jevin_telemetry_pos(
 			(double)companion->object.position.n[0],
 			(double)companion->object.position.n[1],
 			(double)companion->object.position.n[2]);
+	}
+
+	/* and the same answer down the order ring, so the process running the harness
+	prints it too: numbers that exist only on the screen have to be screenshotted,
+	and numbers in a terminal can be pasted. */
+	{
+		char ring[128];
+
+		_snprintf(ring, NUMBEROF(ring) - 2, "pos %.2f %.2f %.2f %.2f %.2f %.2f",
+			(double)object->object.position.n[0],
+			(double)object->object.position.n[1],
+			(double)object->object.position.n[2],
+			companion != NULL ? (double)companion->object.position.n[0] : 0.0,
+			companion != NULL ? (double)companion->object.position.n[1] : 0.0,
+			companion != NULL ? (double)companion->object.position.n[2] : 0.0);
+		ring[NUMBEROF(ring) - 2] = '\0';
+		jevin_telemetry_order(ring);
 	}
 }
 

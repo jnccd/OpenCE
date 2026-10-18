@@ -230,8 +230,24 @@ void terminal_draw(
 
 	if (terminal_output_mode == 0)
 		return;
-	if (terminal_output_mode == 1 && terminal_globals.input_state == NULL)
-		return;
+	if (terminal_output_mode == 1)
+	{
+		/* port: show the console for a few seconds after something is printed, so
+		a reply to a command typed at the console can be read once it closes.
+		Routine telemetry never reaches this buffer - it goes to the telnet client
+		only - so the screen stays clean during play. */
+		enum { LINGER_TICKS = 5 * 30 };
+		static long newest_seen = NONE;
+		static long visible_until;
+
+		if (terminal_globals.newest_output_line_index != newest_seen)
+		{
+			newest_seen = terminal_globals.newest_output_line_index;
+			visible_until = game_time_get() + LINGER_TICKS;
+		}
+		if (terminal_globals.input_state == NULL && game_time_get() > visible_until)
+			return;
+	}
 
 	if (terminal_globals.initialized)
 	{

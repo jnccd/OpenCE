@@ -47,7 +47,12 @@ does its own geometry, which keeps this a dump rather than a query.
 #include "tag_files/tag_groups.h"
 #include "unit_control_data.h"
 #include "units/units.h"
+#include "interface/terminal.h"
+#include "networking/telnet_console.h"
 #include "jevin_telemetry.h"
+
+#include <stdarg.h>
+#include <stdio.h>
 
 /* interface/terminal.c: when the console's text is drawn over the game, 0/1/2 */
 extern long terminal_output_mode;
@@ -71,6 +76,27 @@ int jevin_skip_cinematics(
 /* the most objects one dump reports, so that a busy level cannot flood the
 console (a30 keeps well under a hundred near a player) */
 #define MAXIMUM_TELEMETRY_OBJECTS 256
+
+/* a reply for the controlling process only.
+
+The console's output buffer is what gets drawn over the game, and this module
+talks ten times a second - the terrain grid alone is fifty lines. A harness does
+not need its own telemetry painted on screen, so the frequent replies go straight
+to the telnet client and never reach the buffer. What a person asks for (`pos`,
+the order ack, the draw toggle) still uses console_printf and stays visible. */
+static void jevin_printf_quiet(
+	char const *format,
+	...)
+{
+	char buffer[TERMINAL_PRINTF_MAXIMUM_LINE_LENGTH];
+	va_list arglist;
+
+	va_start(arglist, format);
+	_vsnprintf(buffer, NUMBEROF(buffer) - 2, format, arglist);
+	va_end(arglist);
+	buffer[NUMBEROF(buffer) - 2] = '\0';
+	telnet_console_print(buffer);
+}
 
 /* ---------- helpers */
 
@@ -152,10 +178,10 @@ static void jevin_telemetry_report(
 
 	if (object == NULL)
 	{
-		console_printf(FALSE, "JEVIN tp missing %ld", index);
+		jevin_printf_quiet("JEVIN tp missing %ld", index);
 		return;
 	}
-	console_printf(FALSE, "JEVIN tp %ld %.3f %.3f %.3f", index,
+	jevin_printf_quiet("JEVIN tp %ld %.3f %.3f %.3f", index,
 		(double)object->object.position.n[0],
 		(double)object->object.position.n[1],
 		(double)object->object.position.n[2]);
@@ -175,7 +201,7 @@ static void jevin_telemetry_teleport(
 
 	if (object == NULL)
 	{
-		console_printf(FALSE, "JEVIN tp missing %ld", index);
+		jevin_printf_quiet("JEVIN tp missing %ld", index);
 		return;
 	}
 	if (target_index != NONE)
@@ -184,7 +210,7 @@ static void jevin_telemetry_teleport(
 
 		if (target == NULL)
 		{
-			console_printf(FALSE, "JEVIN tp missing_target %ld", target_index);
+			jevin_printf_quiet("JEVIN tp missing_target %ld", target_index);
 			return;
 		}
 		position = target->object.position;
@@ -204,7 +230,7 @@ static void jevin_telemetry_teleport(
 	scenario_location_from_point(&location, &position);
 	if (location.cluster_index == NONE)
 	{
-		console_printf(FALSE, "JEVIN tp outside %.3f %.3f %.3f",
+		jevin_printf_quiet("JEVIN tp outside %.3f %.3f %.3f",
 			(double)position.n[0], (double)position.n[1], (double)position.n[2]);
 		return;
 	}
@@ -228,6 +254,27 @@ static long jevin_telemetry_player_unit(
 
 /* ---------- commands */
 
+/* where the player is, in one short line to read off the screen and paste
+somewhere else. Typed at the game's console as `pos` during a test, so it is
+deliberately *not* quiet: seeing it is the whole point, and it is the one reply a
+person is expected to read rather than a process. */
+static void jevin_telemetry_pos(
+	void)
+{
+	long unit_index = jevin_telemetry_player_unit();
+	struct object_datum *object = unit_index != NONE ? object_try_and_get(unit_index) : NULL;
+
+	if (object == NULL)
+	{
+		console_printf(FALSE, "JEVIN pos none");
+		return;
+	}
+	console_printf(FALSE, "JEVIN pos %.2f %.2f %.2f",
+		(double)object->object.position.n[0],
+		(double)object->object.position.n[1],
+		(double)object->object.position.n[2]);
+}
+
 /* where a unit is, and what it is: the reader's origin and orientation */
 static void jevin_telemetry_state(
 	void)
@@ -237,10 +284,10 @@ static void jevin_telemetry_state(
 
 	if (object == NULL)
 	{
-		console_printf(FALSE, "JEVIN state none");
+		jevin_printf_quiet("JEVIN state none");
 		return;
 	}
-	console_printf(FALSE, "JEVIN state %ld %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
+	jevin_printf_quiet("JEVIN state %ld %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
 		(long)unit_index,
 		(double)object->object.position.n[0], (double)object->object.position.n[1], (double)object->object.position.n[2],
 		(double)object->object.forward.n[0], (double)object->object.forward.n[1], (double)object->object.forward.n[2],
@@ -289,12 +336,12 @@ static void jevin_telemetry_objects(
 	}
 
 	if (reference_object != NULL)
-		console_printf(FALSE, "JEVIN b %ld %ld %.3f %.3f %.3f", count, reference,
+		jevin_printf_quiet("JEVIN b %ld %ld %.3f %.3f %.3f", count, reference,
 			(double)reference_object->object.position.x,
 			(double)reference_object->object.position.y,
 			(double)reference_object->object.position.z);
 	else
-		console_printf(FALSE, "JEVIN b %ld %ld 0 0 0", count, (long)NONE);
+		jevin_printf_quiet("JEVIN b %ld %ld 0 0 0", count, (long)NONE);
 
 	{
 		long position_index;
@@ -321,7 +368,7 @@ static void jevin_telemetry_objects(
 				definition ? definition : "");
 		}
 	}
-	console_printf(FALSE, "JEVIN e");
+	jevin_printf_quiet("JEVIN e");
 }
 
 /* ---------- public code */
@@ -338,18 +385,18 @@ static void jevin_telemetry_encounters(
 
 	if (scenario == NULL)
 	{
-		console_printf(FALSE, "JEVIN enc none");
+		jevin_printf_quiet("JEVIN enc none");
 		return;
 	}
 	count = scenario->ai_encounters.count;
-	console_printf(FALSE, "JEVIN encb %ld", count);
+	jevin_printf_quiet("JEVIN encb %ld", count);
 	for (index = 0; index < count; index++)
 	{
 		struct encounter_definition *definition = TAG_BLOCK_GET_ELEMENT(&scenario->ai_encounters, index, struct encounter_definition);
 		long squad_count = definition->squads.count;
 		long squad_index;
 
-		console_printf(FALSE, "JEVIN enc %ld %d %s", index, (int)definition->team_index, definition->name);
+		jevin_printf_quiet("JEVIN enc %ld %d %s", index, (int)definition->team_index, definition->name);
 		for (squad_index = 0; squad_index < squad_count; squad_index++)
 		{
 			struct squad_definition *squad = TAG_BLOCK_GET_ELEMENT(&definition->squads, squad_index, struct squad_definition);
@@ -358,7 +405,7 @@ static void jevin_telemetry_encounters(
 				index, squad_index, (int)squad->min_count, (int)squad->max_count, squad->name);
 		}
 	}
-	console_printf(FALSE, "JEVIN ence");
+	jevin_printf_quiet("JEVIN ence");
 }
 
 /* create an object of the same definition as another one - a second Spartan
@@ -383,7 +430,7 @@ static void jevin_telemetry_spawn(
 
 	if (template == NULL)
 	{
-		console_printf(FALSE, "JEVIN spawn missing_template %ld", template_index);
+		jevin_printf_quiet("JEVIN spawn missing_template %ld", template_index);
 		return;
 	}
 	player = player_index != NONE ? object_try_and_get(player_index) : NULL;
@@ -397,7 +444,7 @@ static void jevin_telemetry_spawn(
 	{
 		if (player == NULL)
 		{
-			console_printf(FALSE, "JEVIN spawn no_player");
+			jevin_printf_quiet("JEVIN spawn no_player");
 			return;
 		}
 		position.n[0] = player->object.position.n[0] + player->object.forward.n[0] * 2.0f;
@@ -407,7 +454,7 @@ static void jevin_telemetry_spawn(
 	scenario_location_from_point(&location, &position);
 	if (location.cluster_index == NONE)
 	{
-		console_printf(FALSE, "JEVIN spawn outside %.3f %.3f %.3f",
+		jevin_printf_quiet("JEVIN spawn outside %.3f %.3f %.3f",
 			(double)position.n[0], (double)position.n[1], (double)position.n[2]);
 		return;
 	}
@@ -429,12 +476,12 @@ static void jevin_telemetry_spawn(
 	new_index = object_new(&data);
 	if (new_index == NONE)
 	{
-		console_printf(FALSE, "JEVIN spawn failed");
+		jevin_printf_quiet("JEVIN spawn failed");
 		return;
 	}
 	if (object_try_and_get(new_index) != NULL && object_get_type(new_index) == _object_type_biped)
 		unit_new(new_index);
-	console_printf(FALSE, "JEVIN spawn %ld %d %.3f %.3f %.3f", new_index,
+	jevin_printf_quiet("JEVIN spawn %ld %d %.3f %.3f %.3f", new_index,
 		(int)object_get_type(new_index),
 		(double)position.n[0], (double)position.n[1], (double)position.n[2]);
 }
@@ -462,7 +509,7 @@ static void jevin_telemetry_ground(
 
 	if (object == NULL)
 	{
-		console_printf(FALSE, "JEVIN ground missing %ld", index);
+		jevin_printf_quiet("JEVIN ground missing %ld", index);
 		return;
 	}
 	if (drop <= 0.0f)
@@ -474,10 +521,10 @@ static void jevin_telemetry_ground(
 	down.n[1] = 0.0f;
 	down.n[2] = -drop;
 	if (collision_test_vector(flags, &point, &down, index, &collision))
-		console_printf(FALSE, "JEVIN ground yes %.3f", (double)(collision.t * drop));
+		jevin_printf_quiet("JEVIN ground yes %.3f", (double)(collision.t * drop));
 	else
-		console_printf(FALSE, "JEVIN ground none %.3f", (double)drop);
-	console_printf(FALSE, "JEVIN gend");
+		jevin_printf_quiet("JEVIN ground none %.3f", (double)drop);
+	jevin_printf_quiet("JEVIN gend");
 }
 
 /* the ground around a unit as a grid, in one console call.
@@ -521,8 +568,8 @@ static void jevin_telemetry_grid(
 
 	if (object == NULL)
 	{
-		console_printf(FALSE, "JEVIN grid missing %ld", index);
-		console_printf(FALSE, "JEVIN gend");
+		jevin_printf_quiet("JEVIN grid missing %ld", index);
+		jevin_printf_quiet("JEVIN gend");
 		return;
 	}
 	if (spacing <= 0.0f)
@@ -568,7 +615,7 @@ static void jevin_telemetry_grid(
 					/* nothing below this point: report the bottom of the
 					column that was searched, so the reader knows how far the
 					floor is from here */
-					console_printf(FALSE, "JEVIN g %ld %ld %ld none %.3f %d %d %d",
+					jevin_printf_quiet("JEVIN g %ld %ld %ld none %.3f %d %d %d",
 						i, j, layer,
 						(double)(start_z - drop - object->object.position.n[2]),
 						(int)(probe_location.cluster_index != NONE),
@@ -582,7 +629,7 @@ static void jevin_telemetry_grid(
 				cluster and water state matter */
 				point.n[2] = surface_z + 0.05f;
 				scenario_location_from_point(&probe_location, &point);
-				console_printf(FALSE, "JEVIN g %ld %ld %ld hit %.3f %d %d %d",
+				jevin_printf_quiet("JEVIN g %ld %ld %ld hit %.3f %d %d %d",
 					i, j, layer,
 					(double)(surface_z - object->object.position.n[2]),
 					(int)(probe_location.cluster_index != NONE),
@@ -595,7 +642,7 @@ static void jevin_telemetry_grid(
 			}
 		}
 	}
-	console_printf(FALSE, "JEVIN gend");
+	jevin_printf_quiet("JEVIN gend");
 }
 
 /* the same ledge test, but from a point offset in world space rather than
@@ -618,7 +665,7 @@ static void jevin_telemetry_ground_at(
 
 	if (object == NULL)
 	{
-		console_printf(FALSE, "JEVIN ground missing %ld", index);
+		jevin_printf_quiet("JEVIN ground missing %ld", index);
 		return;
 	}
 	if (drop <= 0.0f)
@@ -635,16 +682,16 @@ static void jevin_telemetry_ground_at(
 	down.n[1] = 0.0f;
 	down.n[2] = -drop;
 	if (collision_test_vector(flags, &point, &down, index, &collision))
-		console_printf(FALSE, "JEVIN groundat %.3f %.3f yes %.3f %d %d %d",
+		jevin_printf_quiet("JEVIN groundat %.3f %.3f yes %.3f %d %d %d",
 			(double)dx, (double)dy, (double)(collision.t * drop),
 			(int)probe_location.cluster_index, (int)own_cluster,
 			(int)scenario_location_underwater(&probe_location, &point, NULL));
 	else
-		console_printf(FALSE, "JEVIN groundat %.3f %.3f none %.3f %d %d %d",
+		jevin_printf_quiet("JEVIN groundat %.3f %.3f none %.3f %d %d %d",
 			(double)dx, (double)dy, (double)drop,
 			(int)probe_location.cluster_index, (int)own_cluster,
 			(int)scenario_location_underwater(&probe_location, &point, NULL));
-	console_printf(FALSE, "JEVIN gend");
+	jevin_printf_quiet("JEVIN gend");
 }
 
 /* a compact per-tick readout for a control loop: the same objects as
@@ -696,12 +743,12 @@ static void jevin_telemetry_snapshot(
 	}
 
 	if (reference_object != NULL)
-		console_printf(FALSE, "JEVIN s %ld %ld %.3f %.3f %.3f", count, reference,
+		jevin_printf_quiet("JEVIN s %ld %ld %.3f %.3f %.3f", count, reference,
 			(double)reference_object->object.position.n[0],
 			(double)reference_object->object.position.n[1],
 			(double)reference_object->object.position.n[2]);
 	else
-		console_printf(FALSE, "JEVIN s %ld %ld 0 0 0", count, (long)NONE);
+		jevin_printf_quiet("JEVIN s %ld %ld 0 0 0", count, (long)NONE);
 
 	{
 		long position_index;
@@ -713,7 +760,7 @@ static void jevin_telemetry_snapshot(
 
 			if (object == NULL)
 				continue;
-			console_printf(FALSE, "JEVIN n %ld %d %d %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
+			jevin_printf_quiet("JEVIN n %ld %d %d %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
 				index, (int)object->object.type, (int)object->object.owner_team_index,
 				reference_object != NULL ? (double)(object->object.position.n[0] - reference_object->object.position.n[0]) : 0.0,
 				reference_object != NULL ? (double)(object->object.position.n[1] - reference_object->object.position.n[1]) : 0.0,
@@ -731,7 +778,7 @@ static void jevin_telemetry_snapshot(
 				(double)object->object.forward.n[2]);
 		}
 	}
-	console_printf(FALSE, "JEVIN z");
+	jevin_printf_quiet("JEVIN z");
 }
 
 /* drive a body: write its velocity and turn it the way it is going.
@@ -750,7 +797,7 @@ static void jevin_telemetry_push(
 
 	if (object == NULL)
 	{
-		console_printf(FALSE, "JEVIN push missing %ld", index);
+		jevin_printf_quiet("JEVIN push missing %ld", index);
 		return;
 	}
 	object->object.translational_velocity.n[0] = vx;
@@ -768,7 +815,7 @@ static void jevin_telemetry_push(
 		object->object.up.n[1] = 0.0f;
 		object->object.up.n[2] = 1.0f;
 	}
-	console_printf(FALSE, "JEVIN push %ld %.3f %.3f %.3f %.3f %.3f %.3f",
+	jevin_printf_quiet("JEVIN push %ld %.3f %.3f %.3f %.3f %.3f %.3f",
 		index,
 		(double)object->object.position.n[0],
 		(double)object->object.position.n[1],
@@ -834,7 +881,7 @@ static void jevin_telemetry_weapons(
 	long count = 0;
 
 	object_iterator_new(&iterator, FLAG(_object_type_weapon), 0);
-	console_printf(FALSE, "JEVIN wb");
+	jevin_printf_quiet("JEVIN wb");
 	while (count < 128)
 	{
 		struct object_datum *object = object_iterator_next(&iterator);
@@ -843,10 +890,10 @@ static void jevin_telemetry_weapons(
 		if (object == NULL)
 			break;
 		definition = tag_get_name(object->definition_index);
-		console_printf(FALSE, "JEVIN w %ld %s", iterator.index, definition ? definition : "");
+		jevin_printf_quiet("JEVIN w %ld %s", iterator.index, definition ? definition : "");
 		count++;
 	}
-	console_printf(FALSE, "JEVIN we");
+	jevin_printf_quiet("JEVIN we");
 }
 /* put a weapon in a unit inventory. The template is any object whose
 definition is the weapon wanted, so a rifle already lying on the ground is
@@ -869,14 +916,14 @@ static void jevin_telemetry_give(
 
 	if (unit == NULL || template == NULL)
 	{
-		console_printf(FALSE, "JEVIN give missing %ld %ld", unit_index, template_index);
+		jevin_printf_quiet("JEVIN give missing %ld %ld", unit_index, template_index);
 		return;
 	}
 	position = unit->object.position;
 	scenario_location_from_point(&location, &position);
 	if (location.cluster_index == NONE)
 	{
-		console_printf(FALSE, "JEVIN give outside");
+		jevin_printf_quiet("JEVIN give outside");
 		return;
 	}
 	object_placement_data_new(&data, template->definition_index, NONE);
@@ -886,16 +933,16 @@ static void jevin_telemetry_give(
 	weapon_index = object_new(&data);
 	if (weapon_index == NONE)
 	{
-		console_printf(FALSE, "JEVIN give no_object");
+		jevin_printf_quiet("JEVIN give no_object");
 		return;
 	}
 	if (!unit_add_weapon_to_inventory(unit_index, weapon_index, TRUE))
 	{
-		console_printf(FALSE, "JEVIN give refused %ld", weapon_index);
+		jevin_printf_quiet("JEVIN give refused %ld", weapon_index);
 		object_delete(weapon_index);
 		return;
 	}
-	console_printf(FALSE, "JEVIN give %ld %ld", unit_index, weapon_index);
+	jevin_printf_quiet("JEVIN give %ld %ld", unit_index, weapon_index);
 }
 /* state for the remote control section below; declared here because the
 per-tick hook that the engine calls sits above it */
@@ -993,7 +1040,7 @@ static void jevin_telemetry_probe(
 
 	if (object == NULL)
 	{
-		console_printf(FALSE, "JEVIN probe missing %ld", index);
+		jevin_printf_quiet("JEVIN probe missing %ld", index);
 		return;
 	}
 	if (length <= 0.0f)
@@ -1003,7 +1050,7 @@ static void jevin_telemetry_probe(
 
 		if (norm < 1e-6f)
 		{
-			console_printf(FALSE, "JEVIN probe direction");
+			jevin_printf_quiet("JEVIN probe direction");
 			return;
 		}
 		dx /= norm;
@@ -1017,10 +1064,10 @@ static void jevin_telemetry_probe(
 	direction.n[2] = 0.0f;
 	if (collision_test_vector(flags, &point, &direction, index, &collision))
 		/* a hit: the distance to whatever is in the way */
-		console_printf(FALSE, "JEVIN probe hit %.3f", (double)(collision.t * length));
+		jevin_printf_quiet("JEVIN probe hit %.3f", (double)(collision.t * length));
 	else
-		console_printf(FALSE, "JEVIN probe clear %.3f", (double)length);
-	console_printf(FALSE, "JEVIN pend");
+		jevin_printf_quiet("JEVIN probe clear %.3f", (double)length);
+	jevin_printf_quiet("JEVIN pend");
 }
 
 /* a ray from an object to a point in the world, in three dimensions.
@@ -1047,8 +1094,8 @@ static void jevin_telemetry_ray(
 
 	if (object == NULL)
 	{
-		console_printf(FALSE, "JEVIN ray missing %ld", index);
-		console_printf(FALSE, "JEVIN rend");
+		jevin_printf_quiet("JEVIN ray missing %ld", index);
+		jevin_printf_quiet("JEVIN rend");
 		return;
 	}
 	point.n[0] = object->object.position.n[0];
@@ -1062,8 +1109,8 @@ static void jevin_telemetry_ray(
 		direction.n[2] * direction.n[2]));
 	if (length < 1e-4f || normalize3d(&direction) == 0.0f)
 	{
-		console_printf(FALSE, "JEVIN ray gone %.3f", (double)length);
-		console_printf(FALSE, "JEVIN rend");
+		jevin_printf_quiet("JEVIN ray gone %.3f", (double)length);
+		jevin_printf_quiet("JEVIN rend");
 		return;
 	}
 	/* the engine takes the ray as a displacement, not as a direction: without
@@ -1073,11 +1120,11 @@ static void jevin_telemetry_ray(
 	direction.n[1] *= length;
 	direction.n[2] *= length;
 	if (collision_test_vector(flags, &point, &direction, index, &collision))
-		console_printf(FALSE, "JEVIN ray hit %.3f %.3f",
+		jevin_printf_quiet("JEVIN ray hit %.3f %.3f",
 			(double)(collision.t * length), (double)length);
 	else
-		console_printf(FALSE, "JEVIN ray clear %.3f", (double)length);
-	console_printf(FALSE, "JEVIN rend");
+		jevin_printf_quiet("JEVIN ray clear %.3f", (double)length);
+	jevin_printf_quiet("JEVIN rend");
 }
 
 /* what the weapon system thinks of him: which inventory slot is out, which
@@ -1099,17 +1146,17 @@ static void jevin_telemetry_weaponry(
 
 	if (unit == NULL)
 	{
-		console_printf(FALSE, "JEVIN weaponry not_a_unit %ld", unit_index);
+		jevin_printf_quiet("JEVIN weaponry not_a_unit %ld", unit_index);
 		return;
 	}
 	slot = unit->unit.current_weapon_index;
 	current = unit_inventory_get_weapon(unit_index, (short)slot);
 	desired = unit_inventory_get_weapon(unit_index, unit->unit.desired_weapon_index);
 	count = unit_get_weapon_count(unit_index);
-	console_printf(FALSE, "JEVIN weaponry %ld slot %ld current %ld desired %ld count %ld trigger %.2f flags %04x",
+	jevin_printf_quiet("JEVIN weaponry %ld slot %ld current %ld desired %ld count %ld trigger %.2f flags %04x",
 		unit_index, slot, current, desired, count,
 		(double)unit->unit.primary_trigger, (unsigned)unit->unit.control_flags);
-	console_printf(FALSE, "JEVIN wend");
+	jevin_printf_quiet("JEVIN wend");
 }
 
 /* what the weapon itself has been told, as opposed to what the unit asked
@@ -1139,12 +1186,12 @@ static void jevin_telemetry_weapon_state(
 
 	if (unit == NULL)
 	{
-		console_printf(FALSE, "JEVIN wstate not_a_unit %ld", unit_index);
-		console_printf(FALSE, "JEVIN wsend");
+		jevin_printf_quiet("JEVIN wstate not_a_unit %ld", unit_index);
+		jevin_printf_quiet("JEVIN wsend");
 		return;
 	}
 	weapon_index = unit_inventory_get_weapon(unit_index, (short)unit->unit.current_weapon_index);
-	console_printf(FALSE, "JEVIN wstate %ld flags %04x active %d controllable %d weapon %ld aim %.3f %.3f %.3f face %.3f %.3f %.3f",
+	jevin_printf_quiet("JEVIN wstate %ld flags %04x active %d controllable %d weapon %ld aim %.3f %.3f %.3f face %.3f %.3f %.3f",
 		unit_index, (unsigned)unit->unit.flags,
 		(int)(TEST_FLAG(unit->unit.flags, _unit_actively_controlled_bit) ? 1 : 0),
 		(int)(TEST_FLAG(unit->unit.flags, _unit_controllable_bit) ? 1 : 0),
@@ -1157,19 +1204,19 @@ static void jevin_telemetry_weapon_state(
 		(double)unit->object.forward.n[2]);
 	if (weapon_index == NONE || object_get_type(weapon_index) != _object_type_weapon)
 	{
-		console_printf(FALSE, "JEVIN wdetail none");
-		console_printf(FALSE, "JEVIN wsend");
+		jevin_printf_quiet("JEVIN wdetail none");
+		jevin_printf_quiet("JEVIN wsend");
 		return;
 	}
 	weapon = (struct weapon_datum *)object_try_and_get(weapon_index);
 	if (weapon == NULL)
 	{
-		console_printf(FALSE, "JEVIN wdetail missing %ld", weapon_index);
-		console_printf(FALSE, "JEVIN wsend");
+		jevin_printf_quiet("JEVIN wdetail missing %ld", weapon_index);
+		jevin_printf_quiet("JEVIN wsend");
 		return;
 	}
 	weapon_definition = weapon_definition_get(weapon->definition_index);
-	console_printf(FALSE, "JEVIN wdetail %ld ctrl %04x state %d timer %d trig %.2f heat %.2f lastfired %ld now %ld",
+	jevin_printf_quiet("JEVIN wdetail %ld ctrl %04x state %d timer %d trig %.2f heat %.2f lastfired %ld now %ld",
 		weapon_index, (unsigned)weapon->weapon.control_flags,
 		(int)weapon->weapon.state, (int)weapon->weapon.state_timer,
 		(double)weapon->weapon.primary_trigger, (double)weapon->weapon.heat,
@@ -1181,12 +1228,12 @@ static void jevin_telemetry_weapon_state(
 	{
 		struct weapon_magazine *magazine = &weapon->weapon.magazines[magazine_index];
 
-		console_printf(FALSE, "JEVIN wmag %d loaded %d total %d state %d timer %d",
+		jevin_printf_quiet("JEVIN wmag %d loaded %d total %d state %d timer %d",
 			(int)magazine_index, (int)magazine->rounds_loaded,
 			(int)magazine->rounds_total, (int)magazine->state,
 			(int)magazine->state_timer);
 	}
-	console_printf(FALSE, "JEVIN wsend");
+	jevin_printf_quiet("JEVIN wsend");
 }
 
 /* ---------- give the body an actor ---------- */
@@ -1209,12 +1256,12 @@ static void jevin_actor_attach(
 
 	if (object == NULL || object_get_type(unit_index) != _object_type_biped)
 	{
-		console_printf(FALSE, "JEVIN actor not_a_biped %ld", unit_index);
+		jevin_printf_quiet("JEVIN actor not_a_biped %ld", unit_index);
 		return;
 	}
 	if (actor_data == NULL)
 	{
-		console_printf(FALSE, "JEVIN actor no_actor_data");
+		jevin_printf_quiet("JEVIN actor no_actor_data");
 		return;
 	}
 	for (index = 0; index < (long)actor_data->count; index++)
@@ -1230,7 +1277,7 @@ static void jevin_actor_attach(
 	}
 	if (donor == NONE)
 	{
-		console_printf(FALSE, "JEVIN actor no_donor (ai_place an encounter first)");
+		jevin_printf_quiet("JEVIN actor no_donor (ai_place an encounter first)");
 		return;
 	}
 	{
@@ -1241,7 +1288,7 @@ static void jevin_actor_attach(
 			source->state.initial_state, source->state.default_state, NONE, NONE);
 		if (created == NONE)
 		{
-			console_printf(FALSE, "JEVIN actor failed");
+			jevin_printf_quiet("JEVIN actor failed");
 			return;
 		}
 		{
@@ -1253,7 +1300,7 @@ static void jevin_actor_attach(
 			mine->meta.force_active = TRUE;
 			mine->meta.active = TRUE;
 		}
-		console_printf(FALSE, "JEVIN actor %ld %ld %ld", unit_index, created, donor);
+		jevin_printf_quiet("JEVIN actor %ld %ld %ld", unit_index, created, donor);
 	}
 }
 
@@ -1397,7 +1444,7 @@ static void jevin_remote_walk(
 		jevin_remote_control.control_flags &= ~FLAG(_unit_control_exact_facing_bit);
 	}
 	jevin_remote_apply();
-	console_printf(FALSE, "JEVIN walk %ld %.3f %.3f %.3f", unit_index,
+	jevin_printf_quiet("JEVIN walk %ld %.3f %.3f %.3f", unit_index,
 		(double)jevin_remote_control.throttle.n[0],
 		(double)jevin_remote_control.throttle.n[1],
 		(double)length);
@@ -1444,7 +1491,7 @@ static void jevin_remote_throttle(
 	jevin_remote_control.throttle.n[1] = side * speed;
 	jevin_remote_control.throttle.n[2] = 0.0f;
 	jevin_remote_apply();
-	console_printf(FALSE, "JEVIN throttle %ld %.3f %.3f", unit_index,
+	jevin_printf_quiet("JEVIN throttle %ld %.3f %.3f", unit_index,
 		(double)jevin_remote_control.throttle.n[0],
 		(double)jevin_remote_control.throttle.n[1]);
 }
@@ -1493,7 +1540,7 @@ static void jevin_remote_aim(
 			jevin_remote_apply();
 		}
 	}
-	console_printf(FALSE, "JEVIN aim %ld %.3f %.3f %.3f", unit_index,
+	jevin_printf_quiet("JEVIN aim %ld %.3f %.3f %.3f", unit_index,
 		(double)x, (double)y, (double)z);
 }
 
@@ -1516,7 +1563,7 @@ static void jevin_remote_trigger(
 		jevin_remote_control.control_flags &= ~FLAG(_unit_control_weapon_primary_trigger_bit);
 	}
 	jevin_remote_apply();
-	console_printf(FALSE, "JEVIN trigger %ld %d", unit_index, (int)pressed);
+	jevin_printf_quiet("JEVIN trigger %ld %d", unit_index, (int)pressed);
 }
 
 static boolean jevin_remote_button_bit(
@@ -1543,7 +1590,7 @@ static void jevin_remote_button(
 
 	if (!jevin_remote_button_bit(name, &bit))
 	{
-		console_printf(FALSE, "JEVIN button unknown %s", name);
+		jevin_printf_quiet("JEVIN button unknown %s", name);
 		return;
 	}
 	if (jevin_remote_unit != unit_index && !jevin_remote_begin(unit_index))
@@ -1553,7 +1600,7 @@ static void jevin_remote_button(
 	else
 		jevin_remote_control.control_flags &= ~bit;
 	jevin_remote_apply();
-	console_printf(FALSE, "JEVIN button %ld %s %d", unit_index, name, (int)pressed);
+	jevin_printf_quiet("JEVIN button %ld %s %d", unit_index, name, (int)pressed);
 }
 
 /* choose a weapon slot in the unit's inventory */
@@ -1565,13 +1612,13 @@ static void jevin_remote_weapon(
 		return;
 	if (slot < 0 || slot >= MAXIMUM_WEAPONS_PER_UNIT)
 	{
-		console_printf(FALSE, "JEVIN weapon slot_out_of_range %ld", slot);
+		jevin_printf_quiet("JEVIN weapon slot_out_of_range %ld", slot);
 		return;
 	}
 	jevin_remote_control.weapon_index = (short)slot;
 	jevin_remote_apply();
 	jevin_remote_control.weapon_index = NONE;
-	console_printf(FALSE, "JEVIN weapon %ld %ld", unit_index, slot);
+	jevin_printf_quiet("JEVIN weapon %ld %ld", unit_index, slot);
 }
 
 /* let go of everything: no throttle, no trigger, no buttons */
@@ -1581,7 +1628,7 @@ static void jevin_remote_stop(
 	(void)unit_index;
 	jevin_remote_reset_control();
 	jevin_remote_apply();
-	console_printf(FALSE, "JEVIN stop");
+	jevin_printf_quiet("JEVIN stop");
 }
 
 /* ---------- orders typed into the game console ---------- */
@@ -1617,14 +1664,14 @@ static void jevin_telemetry_order(
 		jevin_order_text[index][used] = '\0';
 		if (used == 0)
 		{
-			console_printf(FALSE, "JEVIN order empty");
+			jevin_printf_quiet("JEVIN order empty");
 			return;
 		}
 	}
 	jevin_order_next_write = (index + 1) % MAXIMUM_JEVIN_ORDERS;
 	if (jevin_order_next_write == jevin_order_next_read)
 		jevin_order_next_read = (jevin_order_next_read + 1) % MAXIMUM_JEVIN_ORDERS; /* drop the oldest */
-	console_printf(FALSE, "JEVIN order taken %s", jevin_order_text[index]);
+	jevin_printf_quiet("JEVIN order taken %s", jevin_order_text[index]);
 }
 
 static void jevin_telemetry_poll(
@@ -1632,10 +1679,10 @@ static void jevin_telemetry_poll(
 {
 	while (jevin_order_next_read != jevin_order_next_write)
 	{
-		console_printf(FALSE, "JEVIN order %s", jevin_order_text[jevin_order_next_read]);
+		jevin_printf_quiet("JEVIN order %s", jevin_order_text[jevin_order_next_read]);
 		jevin_order_next_read = (jevin_order_next_read + 1) % MAXIMUM_JEVIN_ORDERS;
 	}
-	console_printf(FALSE, "JEVIN oend");
+	jevin_printf_quiet("JEVIN oend");
 }
 /* set an object team, or its vitality. Both exist for rehearsal: a reaction
 that needs an enemy in view, or a wounded squadmate, is hard to arrange
@@ -1648,11 +1695,11 @@ static void jevin_telemetry_team(
 
 	if (object == NULL)
 	{
-		console_printf(FALSE, "JEVIN team missing %ld", index);
+		jevin_printf_quiet("JEVIN team missing %ld", index);
 		return;
 	}
 	object->object.owner_team_index = (short)team;
-	console_printf(FALSE, "JEVIN team %ld %d", index, (int)team);
+	jevin_printf_quiet("JEVIN team %ld %d", index, (int)team);
 }
 
 static void jevin_telemetry_health(
@@ -1664,13 +1711,13 @@ static void jevin_telemetry_health(
 
 	if (object == NULL)
 	{
-		console_printf(FALSE, "JEVIN health missing %ld", index);
+		jevin_printf_quiet("JEVIN health missing %ld", index);
 		return;
 	}
 	object->object.body_vitality = body;
 	object->object.shield_vitality = shield;
 	object->object.force_shield_update = TRUE;
-	console_printf(FALSE, "JEVIN health %ld %.3f %.3f", index, (double)body, (double)shield);
+	jevin_printf_quiet("JEVIN health %ld %.3f %.3f", index, (double)body, (double)shield);
 }
 /* clear the console's text from the screen. Whatever a command prints is
 drawn over the game and does not fade, so a picture taken after a telemetry
@@ -1695,10 +1742,10 @@ static void jevin_telemetry_inside(
 	position.n[2] = z;
 	scenario_location_from_point(&location, &position);
 	if (location.cluster_index == NONE)
-		console_printf(FALSE, "JEVIN inside no %.3f %.3f %.3f",
+		jevin_printf_quiet("JEVIN inside no %.3f %.3f %.3f",
 			(double)x, (double)y, (double)z);
 	else
-		console_printf(FALSE, "JEVIN inside yes %.3f %.3f %.3f %d",
+		jevin_printf_quiet("JEVIN inside yes %.3f %.3f %.3f %d",
 			(double)x, (double)y, (double)z, (int)location.cluster_index);
 }
 
@@ -1707,10 +1754,17 @@ boolean jevin_console_command(
 {
 	char const *rest;
 
+	if ((rest = jevin_telemetry_word(expression, "pos")) != NULL ||
+		(rest = jevin_telemetry_word(expression, "jevin_pos")) != NULL)
+	{
+		jevin_telemetry_pos();
+		jevin_printf_quiet("JEVIN ok");
+		return TRUE;
+	}
 	if ((rest = jevin_telemetry_word(expression, "jevin_state")) != NULL)
 	{
 		jevin_telemetry_state();
-		console_printf(FALSE, "JEVIN ok");
+		jevin_printf_quiet("JEVIN ok");
 		return TRUE;
 	}
 	if ((rest = jevin_telemetry_word(expression, "jevin_ground_at")) != NULL)
@@ -1879,7 +1933,7 @@ boolean jevin_console_command(
 		}
 		else
 			console_printf(FALSE, "JEVIN: jevin_walk <unit> <dx> <dy> [speed]");
-		console_printf(FALSE, "JEVIN ok");
+		jevin_printf_quiet("JEVIN ok");
 		return TRUE;
 	}
 	if ((rest = jevin_telemetry_word(expression, "jevin_throttle")) != NULL)
@@ -1895,7 +1949,7 @@ boolean jevin_console_command(
 		}
 		else
 			console_printf(FALSE, "JEVIN: jevin_throttle <unit> <forward> <side> [speed]");
-		console_printf(FALSE, "JEVIN ok");
+		jevin_printf_quiet("JEVIN ok");
 		return TRUE;
 	}
 	if ((rest = jevin_telemetry_word(expression, "jevin_aim")) != NULL)
@@ -1908,7 +1962,7 @@ boolean jevin_console_command(
 			jevin_remote_aim(unit_index, x, y, z);
 		else
 			console_printf(FALSE, "JEVIN: jevin_aim <unit> <x> <y> <z>");
-		console_printf(FALSE, "JEVIN ok");
+		jevin_printf_quiet("JEVIN ok");
 		return TRUE;
 	}
 	if ((rest = jevin_telemetry_word(expression, "jevin_trigger")) != NULL)
@@ -1920,7 +1974,7 @@ boolean jevin_console_command(
 			jevin_remote_trigger(unit_index, pressed);
 		else
 			console_printf(FALSE, "JEVIN: jevin_trigger <unit> <0|1>");
-		console_printf(FALSE, "JEVIN ok");
+		jevin_printf_quiet("JEVIN ok");
 		return TRUE;
 	}
 	if ((rest = jevin_telemetry_word(expression, "jevin_button")) != NULL)
@@ -1948,7 +2002,7 @@ boolean jevin_console_command(
 		}
 		else
 			console_printf(FALSE, "JEVIN: jevin_button <unit> <name> <0|1>");
-		console_printf(FALSE, "JEVIN ok");
+		jevin_printf_quiet("JEVIN ok");
 		return TRUE;
 	}
 	if ((rest = jevin_telemetry_word(expression, "jevin_weapon")) != NULL)
@@ -1960,13 +2014,13 @@ boolean jevin_console_command(
 			jevin_remote_weapon(unit_index, slot);
 		else
 			console_printf(FALSE, "JEVIN: jevin_weapon <unit> <slot>");
-		console_printf(FALSE, "JEVIN ok");
+		jevin_printf_quiet("JEVIN ok");
 		return TRUE;
 	}
 	if ((rest = jevin_telemetry_word(expression, "jevin_release")) != NULL)
 	{
 		jevin_remote_stop(0);
-		console_printf(FALSE, "JEVIN ok");
+		jevin_printf_quiet("JEVIN ok");
 		return TRUE;
 	}
 	if ((rest = jevin_telemetry_word(expression, "jevin_poll")) != NULL)
@@ -1995,7 +2049,7 @@ boolean jevin_console_command(
 			used--;
 		buffer[used] = '\0';
 		if (used <= 5)
-			console_printf(FALSE, "JEVIN talk empty");
+			jevin_printf_quiet("JEVIN talk empty");
 		else
 			jevin_telemetry_order(buffer);
 		return TRUE;

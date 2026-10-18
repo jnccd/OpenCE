@@ -60,6 +60,10 @@ extern long terminal_output_mode;
 /* port_config.c: a setting's stored value */
 int config_boolean(char const *name);
 
+/* the body under remote control. Declared here rather than with the rest of the
+control state because `pos` reports it, and that command is defined above. */
+static long jevin_remote_unit = NONE;
+
 /* port: whether this run wants cutscenes skipped as they start.
 
 A test harness cannot press a key, and injecting seven space presses was the
@@ -263,16 +267,28 @@ static void jevin_telemetry_pos(
 {
 	long unit_index = jevin_telemetry_player_unit();
 	struct object_datum *object = unit_index != NONE ? object_try_and_get(unit_index) : NULL;
+	struct object_datum *companion =
+		jevin_remote_unit != NONE ? object_try_and_get(jevin_remote_unit) : NULL;
 
 	if (object == NULL)
 	{
 		console_printf(FALSE, "JEVIN pos none");
 		return;
 	}
-	console_printf(FALSE, "JEVIN pos %.2f %.2f %.2f",
+	/* Both, and labelled. "Where am I" is the question a person asks when they
+	want to report a place worth testing, and a bare triple left it ambiguous
+	which body it came from. `me` is the player. */
+	console_printf(FALSE, "JEVIN pos me %.2f %.2f %.2f",
 		(double)object->object.position.n[0],
 		(double)object->object.position.n[1],
 		(double)object->object.position.n[2]);
+	if (companion != NULL)
+	{
+		console_printf(FALSE, "JEVIN pos jevin %.2f %.2f %.2f",
+			(double)companion->object.position.n[0],
+			(double)companion->object.position.n[1],
+			(double)companion->object.position.n[2]);
+	}
 }
 
 /* where a unit is, and what it is: the reader's origin and orientation */
@@ -947,7 +963,6 @@ static void jevin_telemetry_give(
 /* state for the remote control section below; declared here because the
 per-tick hook that the engine calls sits above it */
 static struct unit_control_data jevin_remote_control;
-static long jevin_remote_unit = NONE;
 static boolean jevin_remote_ready;
 
 /* Called from unit_update, which is where a unit's control flags are turned
@@ -1125,6 +1140,157 @@ static void jevin_telemetry_ray(
 	else
 		jevin_printf_quiet("JEVIN ray clear %.3f", (double)length);
 	jevin_printf_quiet("JEVIN rend");
+}
+
+/* whether one point in the world can be seen from another.
+
+`jevin_ray` asks "can he see that from where he stands". This asks the same
+question about *two arbitrary points*, which is what "is that spot cover?" means:
+a cell the enemy cannot see into. Cover is the one thing the terrain grid cannot
+answer, because the grid knows floors and this is about what stands between two
+places.
+
+	jevin_los <from x> <from y> <from z> <to x> <to y> <to z>
+	    JEVIN los blocked <distance> | clear <distance>
+	JEVIN losend
+*/
+static void jevin_telemetry_los(
+	real ax, real ay, real az,
+	real bx, real by, real bz)
+{
+	struct collision_result collision;
+	real_point3d point;
+	real_vector3d direction;
+	real length;
+	unsigned long flags = _collision_test_for_projectiles_flags;
+
+	point.n[0] = ax;
+	point.n[1] = ay;
+	point.n[2] = az;
+	direction.n[0] = bx - ax;
+	direction.n[1] = by - ay;
+	direction.n[2] = bz - az;
+	length = (real)sqrt((double)(direction.n[0] * direction.n[0] +
+		direction.n[1] * direction.n[1] +
+		direction.n[2] * direction.n[2]));
+	if (length < 1e-4f || normalize3d(&direction) == 0.0f)
+	{
+		jevin_printf_quiet("JEVIN los gone %.3f", (double)length);
+		jevin_printf_quiet("JEVIN losend");
+		return;
+	}
+	direction.n[0] *= length;
+	direction.n[1] *= length;
+	direction.n[2] *= length;
+	if (collision_test_vector(flags, &point, &direction, NONE, &collision))
+		jevin_printf_quiet("JEVIN los blocked %.3f", (double)(collision.t * length));
+	else
+		jevin_printf_quiet("JEVIN los clear %.3f", (double)length);
+	jevin_printf_quiet("JEVIN losend");
+}
+
+/* the cells near a unit that its enemies cannot see, in one call.
+
+Cover is the one thing the terrain grid cannot answer: the grid knows floors, and
+this is about what stands *between* two points. Sampling the whole field would be
+enormous, so it is sampled the way the terrain is - a small square of candidate
+cells around the unit, tested only against the nearest few enemies. Twenty-five
+cells and four enemies is a hundred rays in one console call, about the price of
+one terrain grid, and the caller reuses the answer for half a second.
+
+	jevin_cover <unit> <spacing> <count> [enemy index...]
+
+	JEVIN c <i> <j> <height> <hidden from> <of>
+	JEVIN cend
+
+`height` is relative to the unit, and a cell is only reported when at least one
+enemy cannot see it. A cell hidden from all of them is cover; one hidden from the
+nearest is still better than standing in the open. */
+static void jevin_telemetry_cover(
+	long index,
+	real spacing,
+	long count,
+	long const *enemies,
+	long enemy_count)
+{
+	struct object_datum *object = object_try_and_get(index);
+	struct collision_result collision;
+	real_vector3d down;
+	real_point3d point;
+	real_point3d eye;
+	real_vector3d sight;
+	unsigned long flags = _collision_test_for_projectiles_flags;
+	long i, j, enemy;
+
+	if (object == NULL || enemy_count <= 0)
+	{
+		jevin_printf_quiet("JEVIN cover missing");
+		jevin_printf_quiet("JEVIN cend");
+		return;
+	}
+	if (spacing <= 0.0f)
+		spacing = 1.0f;
+	if (count < 1)
+		count = 1;
+	if (count > 4)
+		count = 4;                          /* the dump has to stay affordable */
+	down.n[0] = 0.0f;
+	down.n[1] = 0.0f;
+	down.n[2] = -8.0f;
+
+	for (i = -count; i <= count; i++)
+	{
+		for (j = -count; j <= count; j++)
+		{
+			real floor_z;
+			long hidden = 0;
+
+			/* where the floor is at this cell, from just above his feet */
+			point.n[0] = object->object.position.n[0] + (real)i * spacing;
+			point.n[1] = object->object.position.n[1] + (real)j * spacing;
+			point.n[2] = object->object.position.n[2] + 0.9f;
+			if (!collision_test_vector(flags, &point, &down, index, &collision))
+				continue;                   /* no floor: not a place to stand */
+			floor_z = point.n[2] - collision.t * 8.0f;
+			if (floor_z > object->object.position.n[2] + 1.5f ||
+				floor_z < object->object.position.n[2] - 3.0f)
+				continue;                   /* too far up or down to step to */
+
+			/* eye height at the candidate, against each enemy's chest */
+			eye.n[0] = point.n[0];
+			eye.n[1] = point.n[1];
+			eye.n[2] = floor_z + 0.7f;
+			for (enemy = 0; enemy < enemy_count; enemy++)
+			{
+				struct object_datum *hostile = object_try_and_get(enemies[enemy]);
+				real length;
+
+				if (hostile == NULL)
+					continue;
+				sight.n[0] = hostile->object.position.n[0] - eye.n[0];
+				sight.n[1] = hostile->object.position.n[1] - eye.n[1];
+				sight.n[2] = (hostile->object.position.n[2] + 0.45f) - eye.n[2];
+				length = (real)sqrt((double)(sight.n[0] * sight.n[0] +
+					sight.n[1] * sight.n[1] + sight.n[2] * sight.n[2]));
+				if (length < 1e-3f || normalize3d(&sight) == 0.0f)
+					continue;
+				sight.n[0] *= length;
+				sight.n[1] *= length;
+				sight.n[2] *= length;
+				if (collision_test_vector(flags, &eye, &sight, index, &collision) &&
+					collision.t * length < length - 0.6f)
+				{
+					++hidden;           /* something solid is in the way */
+				}
+			}
+
+			if (hidden > 0)
+				jevin_printf_quiet("JEVIN c %ld %ld %.3f %ld %ld",
+					i, j, (double)(floor_z - object->object.position.n[2]),
+					hidden, enemy_count);
+		}
+	}
+	jevin_printf_quiet("JEVIN cend");
 }
 
 /* what the weapon system thinks of him: which inventory slot is out, which
@@ -1888,6 +2054,45 @@ boolean jevin_console_command(
 			jevin_telemetry_ray(index, x, y, z);
 		else
 			console_printf(FALSE, "JEVIN: jevin_ray <object> <x> <y> <z>");
+		return TRUE;
+	}
+	if ((rest = jevin_telemetry_word(expression, "jevin_los")) != NULL)
+	{
+		real ax = 0.0f, ay = 0.0f, az = 0.0f;
+		real bx = 0.0f, by = 0.0f, bz = 0.0f;
+
+		if (jevin_telemetry_real(&rest, &ax) && jevin_telemetry_real(&rest, &ay) &&
+			jevin_telemetry_real(&rest, &az) && jevin_telemetry_real(&rest, &bx) &&
+			jevin_telemetry_real(&rest, &by) && jevin_telemetry_real(&rest, &bz))
+			jevin_telemetry_los(ax, ay, az, bx, by, bz);
+		else
+			console_printf(FALSE,
+				"JEVIN: jevin_los <from x> <from y> <from z> <to x> <to y> <to z>");
+		return TRUE;
+	}
+	if ((rest = jevin_telemetry_word(expression, "jevin_cover")) != NULL)
+	{
+		long unit_index = NONE;
+		real spacing = 0.8f;
+		long count = 2;
+		long enemies[4];
+		long enemy_count = 0;
+
+		if (jevin_telemetry_long(&rest, &unit_index) && jevin_telemetry_real(&rest, &spacing) &&
+			jevin_telemetry_long(&rest, &count))
+		{
+			long enemy = NONE;
+
+			while (enemy_count < (long)NUMBEROF(enemies) &&
+				jevin_telemetry_long(&rest, &enemy))
+			{
+				enemies[enemy_count++] = enemy;
+			}
+			jevin_telemetry_cover(unit_index, spacing, count, enemies, enemy_count);
+		}
+		else
+			console_printf(FALSE,
+				"JEVIN: jevin_cover <unit> <spacing> <count> [enemy index...]");
 		return TRUE;
 	}
 	if ((rest = jevin_telemetry_word(expression, "jevin_weaponry")) != NULL)

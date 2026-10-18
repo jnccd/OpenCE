@@ -40,9 +40,11 @@ does its own geometry, which keeps this a dump rather than a query.
 #include "main/console.h"
 #include "ai/actors.h"
 #include "collisions.h"
+#include "physics/collision_bsp_definitions.h"
 #include "objects/objects.h"
 #include "scenario/scenario.h"
 #include "scenario/scenario_definitions.h"
+#include "structures/structure_bsp_definitions.h"
 #include "tag_files/tag_files.h"
 #include "tag_files/tag_groups.h"
 #include "unit_control_data.h"
@@ -566,6 +568,85 @@ static void jevin_telemetry_ground(
 	jevin_printf_quiet("JEVIN gend");
 }
 
+/* whether the AI's own walkable mesh covers the surface a ray found.
+
+`structure_bsp.pathfinding_surfaces` is one byte of flags per collision
+surface, and bit 6 is "walkable": that byte is what the engine's path search
+checks before it will step from one surface to the next (path.c,
+`_pathfinding_surface_walkable_bit`, read out of the same array). It is the
+closest thing to a navmesh a map has, it is authored rather than measured, and
+it knows two things a downward ray cannot: that the top of a rail is not floor,
+and that a surface too steep, too narrow or under water is not floor either.
+
+2 means "no answer": the ray stopped on an object rather than the structure
+(the pod, a crate), or the map carries no pathfinding data. A reader has to
+fall back to its own tests then, rather than call real ground unwalkable. */
+static long jevin_grid_mesh(
+	struct structure_bsp *structure,
+	struct collision_result *collision)
+{
+	byte const *flags;
+
+	/* `type` is what says whether this was the structure: `object_index` is
+	not cleared for a structure hit, and reading it as one is how this test
+	first answered "an object" for every square metre of a bridge. */
+	if (structure == NULL || collision->type != _collision_result_structure)
+		return 2;
+	if (!VALID_INDEX(collision->surface_index,
+		structure->pathfinding_surfaces.count))
+		return 2;
+	flags = (byte const *)structure->pathfinding_surfaces.address;
+	if (flags == NULL)
+		return 2;
+	return (flags[collision->surface_index] & 0x40) != 0 ? 1 : 0;
+}
+
+/* what the walkable mesh looks like from where he stands, and what a downward
+ray finds there. Written while working out whether `pathfinding_surfaces` is
+indexed by collision surface or by structure surface: the two counts and the
+indices a hit reports answer that in one line. */
+static void jevin_telemetry_meshinfo(
+	long index)
+{
+	struct object_datum *object = object_try_and_get(index);
+	struct structure_bsp *structure = global_structure_bsp_get();
+	struct collision_bsp *collision_bsp = global_collision_bsp_get();
+	struct collision_result collision;
+	real_vector3d down;
+	real_point3d point;
+	unsigned long flags = (1UL << _collision_test_structure_bit);
+	long surface = NONE;
+	long bsp_index = NONE;
+	long bytes = 0;
+	long value = NONE;
+
+	if (object == NULL || structure == NULL || collision_bsp == NULL)
+	{
+		jevin_printf_quiet("JEVIN meshinfo unavailable");
+		return;
+	}
+	point = object->object.position;
+	point.n[2] += 0.5f;
+	down.n[0] = 0.0f;
+	down.n[1] = 0.0f;
+	down.n[2] = -4.0f;
+	if (collision_test_vector(flags, &point, &down, index, &collision))
+	{
+		surface = collision.surface_index;
+		bsp_index = collision.bsp_index;
+	}
+	bytes = structure->pathfinding_surfaces.count;
+	if (bytes <= 0)
+		bytes = 0;
+	if (VALID_INDEX(surface, structure->pathfinding_surfaces.count))
+		value = ((byte const *)structure->pathfinding_surfaces.address)[surface];
+	jevin_printf_quiet("JEVIN meshinfo %ld %ld %ld %ld %ld %ld %ld %ld",
+		structure->pathfinding_surfaces.count,
+		collision_bsp->surfaces.count,
+		structure->surfaces.count,
+		surface, bsp_index, (long)collision.type, collision.object_index, value);
+}
+
 /* the ground around a unit as a grid, in one console call.
 
 A single probe ahead answers "is there a step here", and that is not enough: a
@@ -583,8 +664,13 @@ below that surface, so a bridge deck and the ground under it come back as two
 floors of the same column rather than one. Heights are relative to the unit's own
 position, which is what the controller compares against:
 
-	JEVIN g <i> <j> <layer> hit|none <height> <inside> <water> <same cluster>
+	JEVIN g <i> <j> <layer> hit|none <height> <inside> <water> <same cluster> \
+	        <mesh>
 	JEVIN gend
+
+<mesh> is 1 where the AI's own walkable mesh covers that floor, 0 where it says
+a surface is there but not walkable, and 2 where it has no answer (an object's
+surface, or a map without pathfinding data).
 */
 static void jevin_telemetry_grid(
 	long index,
@@ -596,6 +682,7 @@ static void jevin_telemetry_grid(
 	struct object_datum *object = object_try_and_get(index);
 	struct collision_result collision;
 	struct location probe_location;
+	struct structure_bsp *structure = global_structure_bsp_get();
 	real_vector3d down;
 	real_point3d point;
 	/* structure and objects both: a biped can stand on a crate or a crashed
@@ -654,7 +741,7 @@ static void jevin_telemetry_grid(
 					/* nothing below this point: report the bottom of the
 					column that was searched, so the reader knows how far the
 					floor is from here */
-					jevin_printf_quiet("JEVIN g %ld %ld %ld none %.3f %d %d %d",
+					jevin_printf_quiet("JEVIN g %ld %ld %ld none %.3f %d %d %d 0",
 						i, j, layer,
 						(double)(start_z - drop - object->object.position.n[2]),
 						(int)(probe_location.cluster_index != NONE),
@@ -668,12 +755,13 @@ static void jevin_telemetry_grid(
 				cluster and water state matter */
 				point.n[2] = surface_z + 0.05f;
 				scenario_location_from_point(&probe_location, &point);
-				jevin_printf_quiet("JEVIN g %ld %ld %ld hit %.3f %d %d %d",
+				jevin_printf_quiet("JEVIN g %ld %ld %ld hit %.3f %d %d %d %ld",
 					i, j, layer,
 					(double)(surface_z - object->object.position.n[2]),
 					(int)(probe_location.cluster_index != NONE),
 					(int)scenario_location_underwater(&probe_location, &point, NULL),
-					(int)(probe_location.cluster_index == own_cluster));
+					(int)(probe_location.cluster_index == own_cluster),
+					jevin_grid_mesh(structure, &collision));
 
 				start_z = surface_z - 0.05f;
 				if (start_z <= object->object.position.n[2] - drop)
@@ -1920,6 +2008,62 @@ static void jevin_telemetry_health(
 	object->object.force_shield_update = TRUE;
 	jevin_printf_quiet("JEVIN health %ld %.3f %.3f", index, (double)body, (double)shield);
 }
+
+/* what he can take, measured against the player.
+
+The two maxima are fields of the *object*, not of the tag: damage.c fills them
+in from the collision model when the object is made, and every damage the game
+deals to a biped is spent as a fraction of them ("actual_damage *=
+inverse_maximum_body_vitality"). So raising them raises his health without
+touching a tag, which would raise every cyborg in the level, the player's
+included. The numbers are taken from the player's own maxima, so a scale of 1
+is exactly as hard to kill as the player and 1.5 is half again as much; the
+difficulty multiplier is per object and per team (damage.c,
+object_get_maximum_body_vitality), so it lands on both of them alike. */
+static void jevin_telemetry_vitals(
+	long index,
+	real body_scale,
+	real shield_scale)
+{
+	struct object_datum *object = object_try_and_get(index);
+	struct object_datum *source;
+	long player_index = jevin_telemetry_player_unit();
+	real body_from = 0.0f;
+	real shield_from = 0.0f;
+
+	if (object == NULL)
+	{
+		jevin_printf_quiet("JEVIN vitals missing %ld", index);
+		return;
+	}
+	source = player_index != NONE && player_index != index
+		? object_try_and_get(player_index) : NULL;
+	if (source != NULL)
+	{
+		body_from = source->object.maximum_body_vitality;
+		shield_from = source->object.maximum_shield_vitality;
+	}
+	if (body_scale <= 0.0f)
+		body_scale = 1.0f;
+	if (shield_scale <= 0.0f)
+		shield_scale = 1.0f;
+	/* a maximum of zero would mean the next hit kills him outright, so a
+	missing reading from the player is not copied over his own */
+	if (body_from > 0.0f)
+		object->object.maximum_body_vitality = body_from * body_scale;
+	if (shield_from > 0.0f)
+		object->object.maximum_shield_vitality = shield_from * shield_scale;
+	object->object.body_vitality = object->object.maximum_body_vitality > 0.0f
+		? 1.0f : 0.0f;
+	object->object.shield_vitality = object->object.maximum_shield_vitality > 0.0f
+		? 1.0f : 0.0f;
+	object->object.force_shield_update = TRUE;
+	jevin_printf_quiet("JEVIN vitals %ld %.3f %.3f %.3f %.3f",
+		index,
+		(double)object->object.maximum_body_vitality,
+		(double)object->object.maximum_shield_vitality,
+		(double)body_from, (double)shield_from);
+}
 /* clear the console's text from the screen. Whatever a command prints is
 drawn over the game and does not fade, so a picture taken after a telemetry
 dump is a picture of numbers. The first argument of console_printf is the
@@ -2337,6 +2481,31 @@ boolean jevin_console_command(
 			jevin_telemetry_health(index, body, shield);
 		else
 			console_printf(FALSE, "JEVIN: jevin_health <object> <body> <shield>");
+		return TRUE;
+	}
+	if ((rest = jevin_telemetry_word(expression, "jevin_vitals")) != NULL)
+	{
+		long index = NONE;
+		real body = 1.0f, shield = 1.0f;
+
+		if (jevin_telemetry_long(&rest, &index))
+		{
+			jevin_telemetry_real(&rest, &body);
+			jevin_telemetry_real(&rest, &shield);
+			jevin_telemetry_vitals(index, body, shield);
+		}
+		else
+			console_printf(FALSE, "JEVIN: jevin_vitals <object> [body x] [shield x]");
+		return TRUE;
+	}
+	if ((rest = jevin_telemetry_word(expression, "jevin_meshinfo")) != NULL)
+	{
+		long index = NONE;
+
+		if (jevin_telemetry_long(&rest, &index))
+			jevin_telemetry_meshinfo(index);
+		else
+			console_printf(FALSE, "JEVIN: jevin_meshinfo <unit>");
 		return TRUE;
 	}
 	if ((rest = jevin_telemetry_word(expression, "jevin_clear")) != NULL)

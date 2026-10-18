@@ -49,8 +49,8 @@ does its own geometry, which keeps this a dump rather than a query.
 #include "units/units.h"
 #include "jevin_telemetry.h"
 
-/* interface/terminal.c: whether the console's text is drawn over the game */
-extern boolean terminal_output_visible;
+/* interface/terminal.c: when the console's text is drawn over the game, 0/1/2 */
+extern long terminal_output_mode;
 
 /* port_config.c: a setting's stored value */
 int config_boolean(char const *name);
@@ -1776,11 +1776,15 @@ boolean jevin_console_command(
 	}
 	if ((rest = jevin_telemetry_word(expression, "jevin_console_draw")) != NULL)
 	{
-		long visible = 1;
+		long mode = 1;
 
-		jevin_telemetry_long(&rest, &visible);
-		terminal_output_visible = visible != 0;
-		console_printf(FALSE, "JEVIN console_draw %d", (int)terminal_output_visible);
+		jevin_telemetry_long(&rest, &mode);
+		if (mode < 0)
+			mode = 0;
+		if (mode > 2)
+			mode = 2;
+		terminal_output_mode = mode;
+		console_printf(FALSE, "JEVIN console_draw %ld", mode);
 		return TRUE;
 	}
 	if ((rest = jevin_telemetry_word(expression, "jevin_probe")) != NULL)

@@ -203,10 +203,19 @@ void terminal_gets_end(
 	return;
 }
 
-/* port: whether the console's text is drawn over the game. Its lines still go
-to the log and to telnet clients, so a controlling process keeps its channel
-while the picture stays clean (jevin_console_draw) */
-boolean terminal_output_visible = TRUE;
+/* port: when the console's text is drawn over the game, and what it is for.
+
+Its lines still go to the log and to telnet clients either way, so a controlling
+process keeps its channel while the picture stays clean.
+
+	0  never drawn
+	1  drawn only while the console is open (the default)
+	2  always drawn
+
+Drawing it all the time painted every telemetry reply over the game, which is why
+this exists; drawing it never hid the console a person was trying to type into,
+which is why it is a mode and not a switch (jevin_console_draw). */
+long terminal_output_mode = 1;
 
 void terminal_draw(
 	void)
@@ -219,7 +228,9 @@ void terminal_draw(
 
 	long font_tag_index = interface_get_tag_index(_interface_font_terminal);
 
-	if (!terminal_output_visible)
+	if (terminal_output_mode == 0)
+		return;
+	if (terminal_output_mode == 1 && terminal_globals.input_state == NULL)
 		return;
 
 	if (terminal_globals.initialized)

@@ -56,6 +56,7 @@ symbols in this file:
 #include "bink/bink_playback.h"
 #include "cseries/errors.h"
 #include "cseries/cseries_windows.h"
+#include "cutscene/cinematics.h"
 #include "game/game_globals.h"
 #include "game/players.h"
 #include "input/input.h"
@@ -309,6 +310,21 @@ boolean input_abstraction_port_action_only(
 byte input_abstraction_port_accept(
 	short controller_index)
 {
+	/* port: a setting that taps accept while a cutscene is playing, so a test
+	run does not have to press space seven times to reach the level
+	(game.skip_cinematics).
+
+	A tap, not a hold: holding it down kept the game in its cutscene state, and
+	the player could not walk afterwards. Three ticks down out of every twenty
+	is a person pressing the key about once a second. */
+	if (cinematic_in_progress() && jevin_skip_cinematics())
+	{
+		static long ticks;
+
+		++ticks;
+		return (byte)((ticks % 20) < 3 ? 1 : 0);
+	}
+
 	return controller_index >= 0 && controller_index < MAXIMUM_GAMEPADS ?
 		keyboard_controls[controller_index].ticks[_game_control_jump] : 0;
 }

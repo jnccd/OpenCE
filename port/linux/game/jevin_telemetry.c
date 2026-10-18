@@ -52,6 +52,20 @@ does its own geometry, which keeps this a dump rather than a query.
 /* interface/terminal.c: whether the console's text is drawn over the game */
 extern boolean terminal_output_visible;
 
+/* port_config.c: a setting's stored value */
+int config_boolean(char const *name);
+
+/* port: whether this run wants cutscenes skipped as they start.
+
+A test harness cannot press a key, and injecting seven space presses was the
+workaround. With this set, the accept input - which is what skips a cutscene - is
+held down for as long as one is playing (input_abstraction.c). */
+int jevin_skip_cinematics(
+	void)
+{
+	return config_boolean("game.skip_cinematics") != 0;
+}
+
 #include <string.h>
 
 /* the most objects one dump reports, so that a busy level cannot flood the
@@ -474,20 +488,24 @@ separate probes can both read safe across a gap between them. All of that is
 what a body walks off. Sampling a square of points in one call gives the
 controller the local *shape* of the ground for the price of one round trip.
 
-	jevin_grid <unit> <spacing> <count> [drop]
+	jevin_grid <unit> <spacing> <count> [drop] [layers]
 
-`count` is the radius in cells, so a count of 3 is a 7 by 7 grid. Offsets are in
-cells from the unit. `drop` is measured from 1.5 units above the unit down, so
-ground a step up is still found:
+`count` is the radius in cells, so a count of 3 is a 7 by 7 grid, and offsets are
+in cells from the unit. `layers` is how many surfaces to look for in each column:
+the ray starts above the unit, and after it lands the next layer starts just
+below that surface, so a bridge deck and the ground under it come back as two
+floors of the same column rather than one. Heights are relative to the unit's own
+position, which is what the controller compares against:
 
-	JEVIN g <i> <j> hit|none <drop> <inside> <water> <same cluster>
+	JEVIN g <i> <j> <layer> hit|none <height> <inside> <water> <same cluster>
 	JEVIN gend
 */
 static void jevin_telemetry_grid(
 	long index,
 	real spacing,
 	long count,
-	real drop)
+	real drop,
+	long layers)
 {
 	struct object_datum *object = object_try_and_get(index);
 	struct collision_result collision;
@@ -498,7 +516,7 @@ static void jevin_telemetry_grid(
 	pod, which are object collision models rather than the structure */
 	unsigned long flags = (1UL << _collision_test_structure_bit) |
 		(1UL << _collision_test_objects_bit);
-	long i, j;
+	long i, j, layer;
 	short own_cluster;
 
 	if (object == NULL)
@@ -515,6 +533,10 @@ static void jevin_telemetry_grid(
 		count = 6;                          /* the dump has to stay cheap */
 	if (drop <= 0.0f)
 		drop = 8.0f;
+	if (layers < 1)
+		layers = 1;
+	if (layers > 4)
+		layers = 4;
 	own_cluster = object->object.location.cluster_index;
 	down.n[0] = 0.0f;
 	down.n[1] = 0.0f;
@@ -524,19 +546,53 @@ static void jevin_telemetry_grid(
 	{
 		for (j = -count; j <= count; j++)
 		{
-			boolean found;
+			/* start just above his own feet, not high above his head: the roof
+			of whatever he is standing under is the first thing a ray from up
+			there finds, and then the floor he is actually on never appears in
+			the column at all. Nine tenths of a unit above the origin still
+			catches a step up, which is as much as he can climb. */
+			real start_z = object->object.position.n[2] + 0.9f;
 
-			point.n[0] = object->object.position.n[0] + (real)i * spacing;
-			point.n[1] = object->object.position.n[1] + (real)j * spacing;
-			point.n[2] = object->object.position.n[2] + 1.5f;
-			scenario_location_from_point(&probe_location, &point);
-			found = collision_test_vector(flags, &point, &down, index, &collision) != FALSE;
-			console_printf(FALSE, "JEVIN g %ld %ld %s %.3f %d %d %d",
-				i, j, found ? "hit" : "none",
-				(double)(found ? collision.t * drop : drop),
-				(int)(probe_location.cluster_index != NONE),
-				(int)scenario_location_underwater(&probe_location, &point, NULL),
-				(int)(probe_location.cluster_index == own_cluster));
+			for (layer = 0; layer < layers; layer++)
+			{
+				boolean found;
+				real surface_z;
+
+				point.n[0] = object->object.position.n[0] + (real)i * spacing;
+				point.n[1] = object->object.position.n[1] + (real)j * spacing;
+				point.n[2] = start_z;
+				scenario_location_from_point(&probe_location, &point);
+				found = collision_test_vector(flags, &point, &down, index, &collision) != FALSE;
+				if (!found)
+				{
+					/* nothing below this point: report the bottom of the
+					column that was searched, so the reader knows how far the
+					floor is from here */
+					console_printf(FALSE, "JEVIN g %ld %ld %ld none %.3f %d %d %d",
+						i, j, layer,
+						(double)(start_z - drop - object->object.position.n[2]),
+						(int)(probe_location.cluster_index != NONE),
+						(int)scenario_location_underwater(&probe_location, &point, NULL),
+						(int)(probe_location.cluster_index == own_cluster));
+					break;
+				}
+
+				surface_z = start_z - collision.t * drop;
+				/* the surface, not the start of the ray, is the place whose
+				cluster and water state matter */
+				point.n[2] = surface_z + 0.05f;
+				scenario_location_from_point(&probe_location, &point);
+				console_printf(FALSE, "JEVIN g %ld %ld %ld hit %.3f %d %d %d",
+					i, j, layer,
+					(double)(surface_z - object->object.position.n[2]),
+					(int)(probe_location.cluster_index != NONE),
+					(int)scenario_location_underwater(&probe_location, &point, NULL),
+					(int)(probe_location.cluster_index == own_cluster));
+
+				start_z = surface_z - 0.05f;
+				if (start_z <= object->object.position.n[2] - drop)
+					break;              /* nothing left to search below */
+			}
 		}
 	}
 	console_printf(FALSE, "JEVIN gend");
@@ -1751,15 +1807,17 @@ boolean jevin_console_command(
 		real spacing = 1.0f;
 		long count = 3;
 		real drop = 8.0f;
+		long layers = 2;
 
 		if (jevin_telemetry_long(&rest, &index) && jevin_telemetry_real(&rest, &spacing) &&
 			jevin_telemetry_long(&rest, &count))
 		{
 			jevin_telemetry_real(&rest, &drop);
-			jevin_telemetry_grid(index, spacing, count, drop);
+			jevin_telemetry_long(&rest, &layers);
+			jevin_telemetry_grid(index, spacing, count, drop, layers);
 		}
 		else
-			console_printf(FALSE, "JEVIN: jevin_grid <unit> <spacing> <count> [drop]");
+			console_printf(FALSE, "JEVIN: jevin_grid <unit> <spacing> <count> [drop] [layers]");
 		return TRUE;
 	}
 	if ((rest = jevin_telemetry_word(expression, "jevin_ray")) != NULL)
@@ -1912,7 +1970,8 @@ boolean jevin_console_command(
 		jevin_telemetry_poll();
 		return TRUE;
 	}
-	if ((rest = jevin_telemetry_word(expression, "jevin_talk")) != NULL)
+	if ((rest = jevin_telemetry_word(expression, "jevin_talk")) != NULL ||
+		(rest = jevin_telemetry_word(expression, "jt")) != NULL)
 	{
 		/* conversation, not an order: queued in the same ring with a prefix so
 		the controlling process can tell the two apart */
@@ -1937,7 +1996,8 @@ boolean jevin_console_command(
 			jevin_telemetry_order(buffer);
 		return TRUE;
 	}
-	if ((rest = jevin_telemetry_word(expression, "jevin_order")) != NULL)
+	if ((rest = jevin_telemetry_word(expression, "jevin_order")) != NULL ||
+		(rest = jevin_telemetry_word(expression, "jo")) != NULL)
 	{
 		jevin_telemetry_order(rest);
 		return TRUE;

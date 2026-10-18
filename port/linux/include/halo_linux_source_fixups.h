@@ -33,6 +33,12 @@ void jevin_remote_before_move(long unit_index);
 /* the same for buttons: re-applied in unit_update, which is where the control
 flags become weapon, melee and reload actions */
 void jevin_remote_before_weapon(long unit_index);
+/* game.skip_cinematics: hold the accept input down while a cutscene plays, so a
+test run reaches the level without pressing a key (called from
+input_abstraction.c; defined in port/linux/game/jevin_telemetry.c). An int, not
+a boolean, because this header is force-included before Halo's own types are
+declared. */
+int jevin_skip_cinematics(void);
 
 /* the port's menus' screen for one of ui.map's, by name, else the name
 (port/linux/game/menu_tags.c) */

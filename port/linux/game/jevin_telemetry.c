@@ -1593,7 +1593,19 @@ static void jevin_remote_apply(
 	unit_control(jevin_remote_unit, &jevin_remote_control);
 }
 
-/* walk in a direction: throttle makes the legs move, the facing turns him */
+/* walk in a direction: the facing turns him, the throttle walks him.
+
+The throttle is a *stick*, not a direction, and the engine turns that stick
+into a velocity with the unit's desired facing: `movement_desired.i` is a
+distance along `desired_facing_vector` and `.j` is one across it (units.c,
+"physics.forward = biped->unit.desired_facing_vector", and bipeds.c rotates
+the two into the world). Handing it a world direction in those two fields is
+therefore only right when that direction happens to lie along +x: told to
+walk -x he was sent (-1, 0), which the engine read as "backwards" and walked
+him +x, and told to walk +y he was sent (0, 1), which read as "sideways" and
+walked him -x. That is the running the wrong way, the side-stepping, and the
+reason he left the bridge by the side he had not chosen: only the facing
+points where he is going, so the stick is always full forward. */
 static void jevin_remote_walk(
 	long unit_index,
 	real dx, real dy, real speed)
@@ -1621,8 +1633,8 @@ static void jevin_remote_walk(
 		direction.n[0] = dx / length;
 		direction.n[1] = dy / length;
 		direction.n[2] = 0.0f;
-		jevin_remote_control.throttle.n[0] = direction.n[0] * magnitude;
-		jevin_remote_control.throttle.n[1] = direction.n[1] * magnitude;
+		jevin_remote_control.throttle.n[0] = magnitude;
+		jevin_remote_control.throttle.n[1] = 0.0f;
 		jevin_remote_control.throttle.n[2] = 0.0f;
 		jevin_remote_control.facing_vector = direction;
 		jevin_remote_control.aiming_vector = direction;

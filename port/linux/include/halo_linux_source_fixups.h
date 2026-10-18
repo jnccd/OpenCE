@@ -26,6 +26,14 @@ void render_interpolation_first_person(short local_player_index, struct real_mat
 	short node_count, struct render_camera const *camera);
 float render_interpolation_game_time_sec(long ticks);
 
+/* a remotely controlled unit's throttle, re-applied after the AI has written
+its own so that a commanded walk is not overwritten (port/linux/game/
+jevin_telemetry.c; called from biped_update_moving) */
+void jevin_remote_before_move(long unit_index);
+/* the same for buttons: re-applied in unit_update, which is where the control
+flags become weapon, melee and reload actions */
+void jevin_remote_before_weapon(long unit_index);
+
 /* the port's menus' screen for one of ui.map's, by name, else the name
 (port/linux/game/menu_tags.c) */
 char const *pc_menus_screen(char const *name);

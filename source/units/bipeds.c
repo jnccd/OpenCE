@@ -3541,6 +3541,11 @@ static void biped_update_moving(
 	real movement_scale;
 	word in_flags;
 
+	/* port: a remotely controlled unit's throttle is re-applied here, after
+	the AI has written its own control this tick and before the throttle is
+	turned into a walk cycle (port/linux/game/jevin_telemetry.c) */
+	jevin_remote_before_move(biped_index);
+
 	biped = biped_get(biped_index);
 
 	if (TEST_FLAG(biped->object.flags, _object_at_rest_bit) &&

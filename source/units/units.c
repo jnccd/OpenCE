@@ -5473,6 +5473,11 @@ boolean unit_update(
 	boolean used_time = FALSE;
 	boolean jetpack_cheat_active = FALSE;
 	boolean light_change_state = FALSE;
+
+	/* port: a remotely controlled unit's buttons and trigger are re-applied
+	here, because this is where control flags become weapon, melee and reload
+	actions (port/linux/game/jevin_telemetry.c) */
+	jevin_remote_before_weapon(unit_index);
 	boolean allow_integrated_lights = game_engine_allow_integrated_lights(unit_index);
 
 	profile_enter(unit_update_section);

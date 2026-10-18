@@ -203,6 +203,11 @@ void terminal_gets_end(
 	return;
 }
 
+/* port: whether the console's text is drawn over the game. Its lines still go
+to the log and to telnet clients, so a controlling process keeps its channel
+while the picture stays clean (jevin_console_draw) */
+boolean terminal_output_visible = TRUE;
+
 void terminal_draw(
 	void)
 {
@@ -213,6 +218,9 @@ void terminal_draw(
 	real_argb_color color;
 
 	long font_tag_index = interface_get_tag_index(_interface_font_terminal);
+
+	if (!terminal_output_visible)
+		return;
 
 	if (terminal_globals.initialized)
 	{

@@ -1,4 +1,4 @@
-/*
+﻿/*
 HS.C
 
 symbols in this file:
@@ -2841,6 +2841,7 @@ symbols in this file:
 #include "units/units.h"
 #include "units/vehicles.h"
 #include "coop_scripts.h" /* port: port/linux/game/coop_scripts.c */
+#include "jevin_telemetry.h" /* port: port/linux/game/jevin_telemetry.c */
 #ifdef HALO_PROFILE
 #include "profile_console.h" /* port: port/linux/game/profile_console.c */
 #endif
@@ -15431,6 +15432,10 @@ static boolean hs_compile_and_evaluate_command(
 	if (profile_console_command(expression))
 		return TRUE;
 #endif
+	/* port: what an AI teammate reads of the game (jevin_telemetry.c): where
+	the objects near a unit are, which way they face, whose side they are on */
+	if (jevin_console_command(expression))
+		return TRUE;
 	/* port: the co-op host's bringto, which brings every player to the host
 	(players.c; a client is told it is the host's) */
 	if (hs_host_player_command(expression, "bringto"))

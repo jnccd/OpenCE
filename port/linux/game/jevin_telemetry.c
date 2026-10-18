@@ -1468,17 +1468,26 @@ static void jevin_telemetry_weapon_state(
 		return;
 	}
 	weapon_index = unit_inventory_get_weapon(unit_index, (short)unit->unit.current_weapon_index);
-	jevin_printf_quiet("JEVIN wstate %ld flags %04x active %d controllable %d weapon %ld aim %.3f %.3f %.3f face %.3f %.3f %.3f",
-		unit_index, (unsigned)unit->unit.flags,
-		(int)(TEST_FLAG(unit->unit.flags, _unit_actively_controlled_bit) ? 1 : 0),
-		(int)(TEST_FLAG(unit->unit.flags, _unit_controllable_bit) ? 1 : 0),
-		weapon_index,
-		(double)unit->unit.aiming_vector.n[0],
-		(double)unit->unit.aiming_vector.n[1],
-		(double)unit->unit.aiming_vector.n[2],
-		(double)unit->object.forward.n[0],
-		(double)unit->object.forward.n[1],
-		(double)unit->object.forward.n[2]);
+	{
+		/* the sight is where the shot's line starts, so it is what the aim
+		vector has to be measured from: reporting the aim without it made a
+		correct shot read as four degrees off */
+		real_point3d sight;
+
+		unit_get_camera_position(unit_index, &sight);
+		jevin_printf_quiet("JEVIN wstate %ld flags %04x active %d controllable %d weapon %ld aim %.3f %.3f %.3f face %.3f %.3f %.3f sight %.3f %.3f %.3f",
+			unit_index, (unsigned)unit->unit.flags,
+			(int)(TEST_FLAG(unit->unit.flags, _unit_actively_controlled_bit) ? 1 : 0),
+			(int)(TEST_FLAG(unit->unit.flags, _unit_controllable_bit) ? 1 : 0),
+			weapon_index,
+			(double)unit->unit.aiming_vector.n[0],
+			(double)unit->unit.aiming_vector.n[1],
+			(double)unit->unit.aiming_vector.n[2],
+			(double)unit->object.forward.n[0],
+			(double)unit->object.forward.n[1],
+			(double)unit->object.forward.n[2],
+			(double)sight.n[0], (double)sight.n[1], (double)sight.n[2]);
+	}
 	if (weapon_index == NONE || object_get_type(weapon_index) != _object_type_weapon)
 	{
 		jevin_printf_quiet("JEVIN wdetail none");
@@ -1785,25 +1794,36 @@ static void jevin_remote_throttle(
 		(double)jevin_remote_control.throttle.n[1]);
 }
 
-/* aim at a world point: the unit turns to look, and shoot, at it */
+/* aim at a world point: the unit turns to look, and shoot, at it.
+
+The direction is measured from his *sight* position and not from his feet.
+A projectile leaves along this vector from a point on the line through the
+sight (units.c, unit_adjust_projectile_ray re-projects the muzzle onto the
+line from unit_get_camera_position), so taking the angle from the origin - which
+is at his feet - tilts every shot up by the eye height over the distance: at
+twelve units that is about five degrees, and five degrees at twelve units is
+most of a grunt's body. It is the "aims a bit too high" that the measurements
+had been calling a 4-5 degree aim error all along. */
 static void jevin_remote_aim(
 	long unit_index,
 	real x, real y, real z)
 {
 	struct object_datum *object;
+	real_point3d sight;
 
 	if (jevin_remote_unit != unit_index && !jevin_remote_begin(unit_index))
 		return;
 	object = object_try_and_get(unit_index);
 	if (object == NULL)
 		return;
+	unit_get_camera_position(unit_index, &sight);
 	{
 		real_vector3d direction;
 		real_vector3d facing;
 
-		direction.n[0] = x - object->object.position.n[0];
-		direction.n[1] = y - object->object.position.n[1];
-		direction.n[2] = z - object->object.position.n[2];
+		direction.n[0] = x - sight.n[0];
+		direction.n[1] = y - sight.n[1];
+		direction.n[2] = z - sight.n[2];
 		if (normalize3d(&direction) != 0.0f)
 		{
 			jevin_remote_control.aiming_vector = direction;

@@ -39,6 +39,7 @@ does its own geometry, which keeps this a dump rather than a query.
 #include "items/weapons.h"
 #include "items/weapon_definitions.h"
 #include "main/console.h"
+#include "main/main.h"
 #include "ai/actors.h"
 #include "collisions.h"
 #include "physics/collision_bsp_definitions.h"
@@ -756,6 +757,24 @@ static void jevin_telemetry_route(
 			(double)result.steps[step].point.n[1],
 			(double)result.steps[step].point.n[2]);
 	}
+}
+
+/* which map is loaded, because a harness that changes levels needs to know.
+
+`main_get_map_name` is the single player map name the game itself keeps (it is
+what the save file records and what `map_name` sets), so it is the answer that
+cannot drift from what is actually running.
+
+	jevin_map
+	JEVIN map <name>
+*/
+static void jevin_telemetry_map(
+	void)
+{
+	char *name = main_get_map_name();
+
+	jevin_printf_quiet("JEVIN map %s", name != NULL && name[0] != 0
+		? name : "none");
 }
 
 /* what the ground is like at one point, which for a jump is four units away
@@ -1527,8 +1546,8 @@ static void jevin_telemetry_cover(
 		spacing = 1.0f;
 	if (count < 1)
 		count = 1;
-	if (count > 4)
-		count = 4;                          /* the dump has to stay affordable */
+	if (count > 6)
+		count = 6;                          /* the dump has to stay affordable */
 	down.n[0] = 0.0f;
 	down.n[1] = 0.0f;
 	down.n[2] = -8.0f;
@@ -2605,6 +2624,11 @@ boolean jevin_console_command(
 		jevin_printf_quiet("JEVIN ok");
 		return TRUE;
 	}
+	if ((rest = jevin_telemetry_word(expression, "jevin_map")) != NULL)
+	{
+		jevin_telemetry_map();
+		return TRUE;
+	}
 	if ((rest = jevin_telemetry_word(expression, "jevin_mesh")) != NULL)
 	{
 		real x = 0.0f, y = 0.0f, z = 0.0f;
@@ -2735,6 +2759,9 @@ boolean jevin_console_command(
 		}
 		else
 			console_printf(FALSE, "JEVIN: jevin_vitals <object> [body x] [shield x]");
+		/* the marker a command that changes something answers with: the harness
+		reads to it instead of waiting for the console to fall quiet */
+		jevin_printf_quiet("JEVIN ok");
 		return TRUE;
 	}
 	if ((rest = jevin_telemetry_word(expression, "jevin_meshinfo")) != NULL)

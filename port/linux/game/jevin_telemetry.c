@@ -758,6 +758,57 @@ static void jevin_telemetry_route(
 	}
 }
 
+/* what the ground is like at one point, which for a jump is four units away
+and not one:
+
+	jevin_mesh <x> <y> <z>
+	JEVIN mesh <inside> <water> <walkable> <surface z>
+
+The grid answers that for the 7 by 7 square around him, and a jump lands
+outside it. So this is the same downward ray for one arbitrary point, and the
+`walkable` field is the map's own pathfinding flag for the surface it found (1
+walkable, 0 a surface the AI will not walk, 2 no answer). That flag is what
+makes a landing trustworthy: a jump onto a surface the mesh does not admit is a
+jump somewhere he cannot stand. */
+static void jevin_telemetry_mesh(
+	real x, real y, real z)
+{
+	struct structure_bsp *structure = global_structure_bsp_get();
+	struct collision_result collision;
+	struct location location;
+	real_vector3d down;
+	real_point3d point;
+	unsigned long flags = (1UL << _collision_test_structure_bit);
+	real surface_z;
+	long mesh;
+
+	if (structure == NULL)
+	{
+		jevin_printf_quiet("JEVIN mesh 0 0 2 %.3f", (double)z);
+		return;
+	}
+	point.n[0] = x;
+	point.n[1] = y;
+	point.n[2] = z + 1.5f;
+	down.n[0] = 0.0f;
+	down.n[1] = 0.0f;
+	down.n[2] = -3.0f;
+	if (!collision_test_vector(flags, &point, &down, NONE, &collision))
+	{
+		/* nothing within reach of the ray: not a landing place at all */
+		jevin_printf_quiet("JEVIN mesh 0 0 2 %.3f", (double)z);
+		return;
+	}
+	surface_z = point.n[2] - collision.t * 3.0f;
+	point.n[2] = surface_z + 0.05f;
+	scenario_location_from_point(&location, &point);
+	mesh = jevin_grid_mesh(structure, &collision);
+	jevin_printf_quiet("JEVIN mesh %d %d %ld %.3f",
+		(int)(location.cluster_index != NONE),
+		(int)scenario_location_underwater(&location, &point, NULL),
+		mesh, (double)surface_z);
+}
+
 /* the ground around a unit as a grid, in one console call.
 
 A single probe ahead answers "is there a step here", and that is not enough: a
@@ -1187,6 +1238,16 @@ per-tick hook that the engine calls sits above it */
 static struct unit_control_data jevin_remote_control;
 static boolean jevin_remote_ready;
 
+/* A button held for a number of ticks, counted down in the per-tick hook.
+
+A jump is not a state, it is an edge: a bit left set makes every tick after it
+try to jump again, and a bit cleared a tick too early never leaves the ground.
+The console cannot be relied on to come back in time at this rate either, so
+the countdown lives here: `jevin_button <unit> jump 2` means "press it for two
+ticks", and the module releases it itself. */
+static word jevin_remote_button_bit_held;
+static long jevin_remote_button_ticks;
+
 /* Called from unit_update, which is where a unit's control flags are turned
 into weapon, melee and reload actions. The moving-animation hook is too narrow
 for buttons: it only runs when he walks, so a trigger pulled standing still was
@@ -1253,6 +1314,18 @@ void jevin_remote_before_move(
 	unit->unit.throttle = jevin_remote_control.throttle;
 	if (jevin_remote_control.primary_trigger > 0.0f)
 		unit->unit.primary_trigger = jevin_remote_control.primary_trigger;
+	/* a button pressed for a count of ticks is released here, where every tick
+	passes, rather than by a console call that may not arrive in time */
+	if (jevin_remote_button_ticks > 0)
+	{
+		jevin_remote_button_ticks--;
+		if (jevin_remote_button_ticks <= 0)
+		{
+			jevin_remote_control.control_flags &= ~jevin_remote_button_bit_held;
+			unit->unit.control_flags &= ~jevin_remote_button_bit_held;
+			jevin_remote_button_bit_held = 0;
+		}
+	}
 }
 
 /* ---------- walls, and what the weapon is doing ---------- */
@@ -2015,10 +2088,22 @@ static void jevin_remote_button(
 	}
 	if (jevin_remote_unit != unit_index && !jevin_remote_begin(unit_index))
 		return;
-	if (pressed)
+	if (pressed > 1)
+	{
+		/* held for a number of ticks: the countdown releases it */
+		jevin_remote_button_bit_held = bit;
+		jevin_remote_button_ticks = pressed;
 		jevin_remote_control.control_flags |= bit;
+	}
 	else
-		jevin_remote_control.control_flags &= ~bit;
+	{
+		jevin_remote_button_ticks = 0;
+		jevin_remote_button_bit_held = 0;
+		if (pressed)
+			jevin_remote_control.control_flags |= bit;
+		else
+			jevin_remote_control.control_flags &= ~bit;
+	}
 	jevin_remote_apply();
 	jevin_printf_quiet("JEVIN button %ld %s %d", unit_index, name, (int)pressed);
 }
@@ -2518,6 +2603,17 @@ boolean jevin_console_command(
 		else
 			console_printf(FALSE, "JEVIN: jevin_button <unit> <name> <0|1>");
 		jevin_printf_quiet("JEVIN ok");
+		return TRUE;
+	}
+	if ((rest = jevin_telemetry_word(expression, "jevin_mesh")) != NULL)
+	{
+		real x = 0.0f, y = 0.0f, z = 0.0f;
+
+		if (jevin_telemetry_real(&rest, &x) && jevin_telemetry_real(&rest, &y) &&
+			jevin_telemetry_real(&rest, &z))
+			jevin_telemetry_mesh(x, y, z);
+		else
+			console_printf(FALSE, "JEVIN: jevin_mesh <x> <y> <z>");
 		return TRUE;
 	}
 	if ((rest = jevin_telemetry_word(expression, "jevin_weapon")) != NULL)

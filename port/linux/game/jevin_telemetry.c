@@ -1118,6 +1118,19 @@ static void jevin_telemetry_snapshot(
 
 	if (reference == NONE)
 		reference = jevin_telemetry_player_unit();
+	/* A player in a vehicle is a biped *inside* a vehicle: its own position is
+	the seat, and the seat moves with the hull. That is fine for the distance
+	filter, but every caller of this reads the reference as "where the player
+	is", so use the thing he is riding in - otherwise the harness sees the player
+	at a point that a fast-moving vehicle leaves behind, loses track of Jevin, and
+	treats him as missing. */
+	if (reference != NONE)
+	{
+		long parent = object_get_ultimate_parent(reference);
+
+		if (parent != NONE && object_try_and_get(parent) != NULL)
+			reference = parent;
+	}
 	reference_object = reference != NONE ? object_try_and_get(reference) : NULL;
 	filter = radius > 0.0f && reference_object != NULL;
 

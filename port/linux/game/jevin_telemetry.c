@@ -469,6 +469,34 @@ static void jevin_telemetry_hog(
 	(void)player_unit;
 }
 
+/* where an object is: its own position, or its ultimate parent's.
+
+A biped in a vehicle seat stops maintaining its own position - the world matrix
+comes from the parent - so reading `object.position` for one answers a point that
+is nowhere near the warthog. Measured: a seated Jevin was missing from the
+snapshot every time, because the radius filter compared that stale point with the
+player's and threw him away, and the agent then respawned him as "gone" - which is
+where the second Jevin in a vehicle session came from. */
+static void jevin_telemetry_position_of(
+	long index,
+	struct object_datum *object,
+	real_point3d *position)
+{
+	if (object->object.parent_object_index != NONE)
+	{
+		long parent_index = object_get_ultimate_parent(index);
+		struct object_datum *parent = parent_index != NONE
+			? object_try_and_get(parent_index) : NULL;
+
+		if (parent != NULL)
+		{
+			*position = parent->object.position;
+			return;
+		}
+	}
+	*position = object->object.position;
+}
+
 /* ---------- riding: getting him into the player's vehicle ---------- */
 
 /* `jevin_seat <unit>`: whether this unit is sitting in something, and in which
@@ -675,16 +703,21 @@ static void jevin_telemetry_objects(
 
 		if (object == NULL)
 			break;
+		index = iterator.index;
 		if (filter)
 		{
-			real dx = object->object.position.x - reference_object->object.position.x;
-			real dy = object->object.position.y - reference_object->object.position.y;
-			real dz = object->object.position.z - reference_object->object.position.z;
+			real_point3d here;
+			real dx;
+			real dy;
+			real dz;
 
+			jevin_telemetry_position_of(index, object, &here);
+			dx = here.n[0] - reference_object->object.position.n[0];
+			dy = here.n[1] - reference_object->object.position.n[1];
+			dz = here.n[2] - reference_object->object.position.n[2];
 			if (dx * dx + dy * dy + dz * dz > radius_squared)
 				continue;
 		}
-		index = iterator.index;
 		indices[count++] = index;
 	}
 
@@ -704,14 +737,16 @@ static void jevin_telemetry_objects(
 			long index = indices[position_index];
 			struct object_datum *object = object_try_and_get(index);
 			char const *definition;
+			real_point3d where;
 
 			if (object == NULL)
 				continue;
 			definition = tag_get_name(object->definition_index);
+			jevin_telemetry_position_of(index, object, &where);
 			console_printf(FALSE,
 				"JEVIN o %ld %d %d %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %s",
 				index, (int)object->object.type, (int)object->object.owner_team_index,
-				(double)object->object.position.n[0], (double)object->object.position.n[1], (double)object->object.position.n[2],
+				(double)where.n[0], (double)where.n[1], (double)where.n[2],
 				(double)object->object.bounding_sphere_radius,
 				(double)object->object.translational_velocity.n[0],
 				(double)object->object.translational_velocity.n[1],
@@ -1364,10 +1399,18 @@ static void jevin_telemetry_snapshot(
 			break;
 		if (filter)
 		{
-			real dx = object->object.position.n[0] - reference_object->object.position.n[0];
-			real dy = object->object.position.n[1] - reference_object->object.position.n[1];
-			real dz = object->object.position.n[2] - reference_object->object.position.n[2];
+			real_point3d here;
+			real dx;
+			real dy;
+			real dz;
 
+			/* a body in a seat keeps no position of its own: test and report the
+			parent's, or it is thrown away by this filter and the harness thinks it
+			was erased (measured: that is what produced a second Jevin) */
+			jevin_telemetry_position_of(iterator.index, object, &here);
+			dx = here.n[0] - reference_object->object.position.n[0];
+			dy = here.n[1] - reference_object->object.position.n[1];
+			dz = here.n[2] - reference_object->object.position.n[2];
 			if (dx * dx + dy * dy + dz * dz > radius_squared)
 				continue;
 		}
@@ -1389,14 +1432,16 @@ static void jevin_telemetry_snapshot(
 		{
 			long index = indices[position_index];
 			struct object_datum *object = object_try_and_get(index);
+			real_point3d where;
 
 			if (object == NULL)
 				continue;
+			jevin_telemetry_position_of(index, object, &where);
 			jevin_printf_quiet("JEVIN n %ld %d %d %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
 				index, (int)object->object.type, (int)object->object.owner_team_index,
-				reference_object != NULL ? (double)(object->object.position.n[0] - reference_object->object.position.n[0]) : 0.0,
-				reference_object != NULL ? (double)(object->object.position.n[1] - reference_object->object.position.n[1]) : 0.0,
-				reference_object != NULL ? (double)(object->object.position.n[2] - reference_object->object.position.n[2]) : 0.0,
+				reference_object != NULL ? (double)(where.n[0] - reference_object->object.position.n[0]) : 0.0,
+				reference_object != NULL ? (double)(where.n[1] - reference_object->object.position.n[1]) : 0.0,
+				reference_object != NULL ? (double)(where.n[2] - reference_object->object.position.n[2]) : 0.0,
 				(double)object->object.bounding_sphere_radius,
 				(double)object->object.body_vitality,
 				(double)object->object.shield_vitality,
@@ -1499,7 +1544,9 @@ static void jevin_telemetry_color(
 		object->object.outgoing_change_colors[slot].n[1] = green;
 		object->object.outgoing_change_colors[slot].n[2] = blue;
 	}
-	console_printf(FALSE, "JEVIN color %ld %.3f %.3f %.3f", index,
+	/* quiet: this is a harness reply, and a respawn otherwise paints it over
+			the game every time - which is the `JEVIN color` spam a person sees */
+		jevin_printf_quiet("JEVIN color %ld %.3f %.3f %.3f", index,
 		(double)red, (double)green, (double)blue);
 }
 

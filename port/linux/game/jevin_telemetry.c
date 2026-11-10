@@ -288,10 +288,21 @@ static void jevin_telemetry_pos(
 	/* Both, and labelled. "Where am I" is the question a person asks when they
 	want to report a place worth testing, and a bare triple left it ambiguous
 	which body it came from. `me` is the player. */
-	console_printf(FALSE, "JEVIN pos me %.2f %.2f %.2f",
-		(double)object->object.position.n[0],
-		(double)object->object.position.n[1],
-		(double)object->object.position.n[2]);
+	{
+		real_point3d eye;
+
+		/* The eye is the point a sightline has to be tested from: his shots leave
+		the camera, not his feet, and a ray from the feet reads as blocked by the
+		ground on every slope. Both are printed so that a person reporting a place
+		hands over the same numbers the harness uses. */
+		unit_get_camera_position(unit_index, &eye);
+		console_printf(FALSE,
+			"JEVIN pos me %.2f %.2f %.2f eye %.2f %.2f %.2f",
+			(double)object->object.position.n[0],
+			(double)object->object.position.n[1],
+			(double)object->object.position.n[2],
+			(double)eye.n[0], (double)eye.n[1], (double)eye.n[2]);
+	}
 	if (companion != NULL)
 	{
 		console_printf(FALSE, "JEVIN pos jevin %.2f %.2f %.2f",

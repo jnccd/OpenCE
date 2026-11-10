@@ -1618,6 +1618,12 @@ static void jevin_telemetry_los(
 		FLAG(_collision_test_objects_machines_bit) |
 		FLAG(_collision_test_objects_controls_bit) |
 		FLAG(_collision_test_objects_light_fixtures_bit);
+	/* ... but not the bipeds themselves. A bullet-shaped ray stops on the target
+	it is aimed at, so at two units the answer was always "blocked": the enemy
+	was hit by the ray a metre short of its own chest, which read as cover and
+	held his fire at the range where he can hardly miss. That is the aim flicker
+	at close quarters - blocked, clear, blocked, several times a second. */
+	flags &= ~FLAG(_collision_test_objects_bipeds_bit);
 	point.n[0] = ax;
 	point.n[1] = ay;
 	point.n[2] = az;

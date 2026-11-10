@@ -1267,6 +1267,11 @@ ticks", and the module releases it itself. */
 static word jevin_remote_button_bit_held;
 static long jevin_remote_button_ticks;
 
+/* the co-op revive watch, defined further down but called from the hook below,
+which every unit passes through every tick */
+static void jevin_revive_watch(
+	long unit_index);
+
 /* Called from unit_update, which is where a unit's control flags are turned
 into weapon, melee and reload actions. The moving-animation hook is too narrow
 for buttons: it only runs when he walks, so a trigger pulled standing still was
@@ -1290,6 +1295,11 @@ void jevin_remote_before_weapon(
 		FLAG(_unit_control_action_bit) |
 		FLAG(_unit_control_exact_facing_bit) |
 		FLAG(_unit_control_integrated_light_bit);
+
+	/* before the early return below, which only wants the remotely controlled
+	unit: the revive watch has to see the *player's* press, and this hook is
+	the one place every unit passes through every tick */
+	jevin_revive_watch(unit_index);
 
 	if (jevin_remote_unit == NONE || unit_index != jevin_remote_unit)
 		return;
@@ -1345,6 +1355,105 @@ void jevin_remote_before_move(
 			jevin_remote_button_bit_held = 0;
 		}
 	}
+}
+
+/* ---------- a co-op revive: the player picks him up ---------- */
+
+/* A dead biped in this engine is an object with zero body vitality, and it stays
+one - the body lies where it fell. That is exactly what a co-op revive needs, so
+the two pieces are: put the corpse back on its feet, and let the player's own
+action button (the one Halo uses to pick a weapon up) be what does it.
+
+The watch lives here rather than being polled from the harness so the press is
+answered on the tick it happens. `jevin_remote_before_weapon` is called for every
+unit, so the *player's* control flags are visible there - and the edge matters:
+players hold that button down for other reasons, and only a fresh press should
+count. */
+static long jevin_revive_corpse = NONE;
+static long jevin_revive_player = NONE;
+static real jevin_revive_radius = 3.0f;
+static boolean jevin_revive_last_action = FALSE;
+static boolean jevin_revive_finished = FALSE;
+
+/* Stand a corpse up: the vitality, the dead flag, the animation, and enough
+waking up that the engine gives it control again. */
+static boolean jevin_revive_body(
+	long index)
+{
+	struct object_datum *object = object_try_and_get(index);
+	struct unit_datum *unit = unit_try_and_get(index);
+
+	if (object == NULL || unit == NULL)
+		return FALSE;
+	if (object_get_type(index) != _object_type_biped)
+		return FALSE;
+	object->object.damage_flags &= ~FLAG(_object_dead_bit);
+	object->object.body_vitality = object->object.maximum_body_vitality > 0.0f
+		? 1.0f : 0.0f;
+	object->object.shield_vitality = object->object.maximum_shield_vitality > 0.0f
+		? 1.0f : 0.0f;
+	object->object.force_shield_update = TRUE;
+	/* the body is lying in its death animation: ask for the idle state and let
+	the animation code pick it, which is the same path a spawned body takes */
+	unit->unit.animation.desired_state = _unit_state_idle;
+	object->object.flags &= ~FLAG(_object_at_rest_bit);
+	SET_FLAG(unit->unit.flags, _unit_actively_controlled_bit, TRUE);
+	return TRUE;
+}
+
+/* Arm the watch: `jevin_revive <corpse> <player> [radius]`. */
+static void jevin_telemetry_revive(
+	long corpse,
+	long player,
+	real radius)
+{
+	jevin_revive_corpse = corpse;
+	jevin_revive_player = player;
+	jevin_revive_radius = radius > 0.0f ? radius : 3.0f;
+	jevin_revive_last_action = FALSE;
+	jevin_revive_finished = FALSE;
+	jevin_printf_quiet("JEVIN revive armed %ld %ld %.2f", corpse, player,
+		(double)jevin_revive_radius);
+}
+
+/* Called from the per-tick hook for every unit, before the early return that
+only cares about the unit under remote control. */
+static void jevin_revive_watch(
+	long unit_index)
+{
+	struct object_datum *corpse;
+	struct object_datum *player;
+	struct unit_datum *player_unit;
+	real dx, dy, dz;
+	boolean pressed;
+
+	if (jevin_revive_corpse == NONE || jevin_revive_finished)
+		return;
+	if (unit_index != jevin_revive_player)
+		return;
+	corpse = object_try_and_get(jevin_revive_corpse);
+	player = object_try_and_get(jevin_revive_player);
+	player_unit = unit_try_and_get(jevin_revive_player);
+	if (corpse == NULL || player == NULL || player_unit == NULL)
+	{
+		jevin_revive_corpse = NONE;
+		return;
+	}
+	pressed = TEST_FLAG(player_unit->unit.control_flags,
+		_unit_control_action_bit) != FALSE;
+	dx = corpse->object.position.n[0] - player->object.position.n[0];
+	dy = corpse->object.position.n[1] - player->object.position.n[1];
+	dz = corpse->object.position.n[2] - player->object.position.n[2];
+	if (pressed && !jevin_revive_last_action &&
+		(real)sqrt((double)(dx * dx + dy * dy + dz * dz)) <= jevin_revive_radius)
+	{
+		boolean up = jevin_revive_body(jevin_revive_corpse);
+
+		jevin_revive_finished = TRUE;
+		jevin_printf_quiet(up ? "JEVIN revive up %ld" : "JEVIN revive failed %ld",
+			jevin_revive_corpse);
+	}
+	jevin_revive_last_action = pressed;
 }
 
 /* ---------- walls, and what the weapon is doing ---------- */
@@ -2627,6 +2736,24 @@ boolean jevin_console_command(
 	if ((rest = jevin_telemetry_word(expression, "jevin_map")) != NULL)
 	{
 		jevin_telemetry_map();
+		return TRUE;
+	}
+	if ((rest = jevin_telemetry_word(expression, "jevin_revive")) != NULL)
+	{
+		long corpse = NONE;
+		long player = NONE;
+		real radius = 3.0f;
+
+		if (jevin_telemetry_long(&rest, &corpse) &&
+			jevin_telemetry_long(&rest, &player))
+		{
+			jevin_telemetry_real(&rest, &radius);
+			jevin_telemetry_revive(corpse, player, radius);
+		}
+		else
+			console_printf(FALSE,
+				"JEVIN: jevin_revive <corpse_unit> <player_unit> [radius]");
+		jevin_printf_quiet("JEVIN ok");
 		return TRUE;
 	}
 	if ((rest = jevin_telemetry_word(expression, "jevin_mesh")) != NULL)

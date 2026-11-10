@@ -458,7 +458,7 @@ walkable because the player is standing there.
 
 A biped is finished with unit_new: object_new alone leaves it as geometry
 without a unit body. */
-static void jevin_telemetry_spawn(
+static long jevin_telemetry_spawn(
 	long template_index,
 	boolean at_point,
 	real x, real y, real z)
@@ -474,7 +474,7 @@ static void jevin_telemetry_spawn(
 	if (template == NULL)
 	{
 		jevin_printf_quiet("JEVIN spawn missing_template %ld", template_index);
-		return;
+		return NONE;
 	}
 	player = player_index != NONE ? object_try_and_get(player_index) : NULL;
 	if (at_point)
@@ -499,7 +499,7 @@ static void jevin_telemetry_spawn(
 	{
 		jevin_printf_quiet("JEVIN spawn outside %.3f %.3f %.3f",
 			(double)position.n[0], (double)position.n[1], (double)position.n[2]);
-		return;
+		return NONE;
 	}
 
 	object_placement_data_new(&data, template->definition_index, NONE);
@@ -520,13 +520,14 @@ static void jevin_telemetry_spawn(
 	if (new_index == NONE)
 	{
 		jevin_printf_quiet("JEVIN spawn failed");
-		return;
+		return NONE;
 	}
 	if (object_try_and_get(new_index) != NULL && object_get_type(new_index) == _object_type_biped)
 		unit_new(new_index);
 	jevin_printf_quiet("JEVIN spawn %ld %d %.3f %.3f %.3f", new_index,
 		(int)object_get_type(new_index),
 		(double)position.n[0], (double)position.n[1], (double)position.n[2]);
+	return new_index;
 }
 
 /* how far below the ground is, at a point `ahead` of an object along its
@@ -1374,6 +1375,19 @@ static long jevin_revive_player = NONE;
 static real jevin_revive_radius = 3.0f;
 static boolean jevin_revive_last_action = FALSE;
 static boolean jevin_revive_finished = FALSE;
+static long jevin_revive_result = NONE;
+
+/* `jevin_revive_state`: off, armed once the watch is set, up once the player has
+picked him up - and with which unit, because a replaced body has a new index. */
+static void jevin_telemetry_revive_state(void)
+{
+	if (jevin_revive_corpse == NONE)
+		jevin_printf_quiet("JEVIN revive off %ld", jevin_revive_result);
+	else if (jevin_revive_finished)
+		jevin_printf_quiet("JEVIN revive up %ld", jevin_revive_result);
+	else
+		jevin_printf_quiet("JEVIN revive armed %ld", jevin_revive_corpse);
+}
 
 /* Stand a corpse up: the vitality, the dead flag, the animation, and enough
 waking up that the engine gives it control again. */
@@ -1412,6 +1426,7 @@ static void jevin_telemetry_revive(
 	jevin_revive_radius = radius > 0.0f ? radius : 3.0f;
 	jevin_revive_last_action = FALSE;
 	jevin_revive_finished = FALSE;
+	jevin_revive_result = NONE;
 	jevin_printf_quiet("JEVIN revive armed %ld %ld %.2f", corpse, player,
 		(double)jevin_revive_radius);
 }
@@ -1447,11 +1462,20 @@ static void jevin_revive_watch(
 	if (pressed && !jevin_revive_last_action &&
 		(real)sqrt((double)(dx * dx + dy * dy + dz * dz)) <= jevin_revive_radius)
 	{
-		boolean up = jevin_revive_body(jevin_revive_corpse);
+		real_point3d where = corpse->object.position;
 
+		/* The corpse is *replaced*, not raised. Clearing the dead flag left the
+		body's death pose in the world - measured, the player pressed action and
+		the corpse went on lying there while the unit was alive - so the body
+		that lay there is deleted and a fresh one is spawned on its ground. The
+		spawn prints its own index, and `jevin_revive_state` reports it. */
+		object_delete(jevin_revive_corpse);
+		jevin_revive_result = jevin_telemetry_spawn(jevin_revive_player, TRUE,
+			where.n[0], where.n[1], where.n[2] + 0.05f);
 		jevin_revive_finished = TRUE;
-		jevin_printf_quiet(up ? "JEVIN revive up %ld" : "JEVIN revive failed %ld",
-			jevin_revive_corpse);
+		jevin_printf_quiet(jevin_revive_result != NONE
+			? "JEVIN revive up %ld" : "JEVIN revive failed",
+			jevin_revive_result);
 	}
 	jevin_revive_last_action = pressed;
 }
@@ -2753,6 +2777,12 @@ boolean jevin_console_command(
 		else
 			console_printf(FALSE,
 				"JEVIN: jevin_revive <corpse_unit> <player_unit> [radius]");
+		jevin_printf_quiet("JEVIN ok");
+		return TRUE;
+	}
+	if ((rest = jevin_telemetry_word(expression, "jevin_revive_state")) != NULL)
+	{
+		jevin_telemetry_revive_state();
 		jevin_printf_quiet("JEVIN ok");
 		return TRUE;
 	}

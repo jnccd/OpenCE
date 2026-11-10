@@ -51,6 +51,7 @@ does its own geometry, which keeps this a dump rather than a query.
 #include "tag_files/tag_groups.h"
 #include "unit_control_data.h"
 #include "units/units.h"
+#include "units/unit_definitions.h"
 #include "interface/terminal.h"
 #include "networking/telnet_console.h"
 #include "jevin_telemetry.h"
@@ -343,6 +344,140 @@ static void jevin_telemetry_pos(
 		ring[NUMBEROF(ring) - 2] = '\0';
 		jevin_telemetry_order(ring);
 	}
+}
+
+/* `jevin_names [prefix]`: the scenario's named objects, with their types.
+
+A level's vehicles are placed by name in its scenario, and a test that needs a
+warthog where the level has none can ask the engine to create one by name - but
+only if it knows the name. This prints them, filtered by a prefix so a map with
+four hundred names does not fill the console.
+*/
+static void jevin_telemetry_names(
+	char const *prefix)
+{
+	struct scenario *scenario = global_scenario_get();
+	long index;
+	long printed = 0;
+
+	if (scenario == NULL)
+	{
+		jevin_printf_quiet("JEVIN names none");
+		return;
+	}
+	for (index = 0; index < scenario->object_names.count; ++index)
+	{
+		struct scenario_object_name *name = TAG_BLOCK_GET_ELEMENT(
+			&scenario->object_names, index, struct scenario_object_name);
+
+		if (name == NULL || name->name[0] == '\0')
+			continue;
+		if (prefix != NULL && prefix[0] != '\0' &&
+			_strnicmp(name->name, prefix, csstrlen(prefix)) != 0)
+			continue;
+		jevin_printf_quiet("JEVIN name %ld %d %s", index,
+			(long)name->runtime_object_type, name->name);
+		if (++printed >= 120)
+			break;
+	}
+	jevin_printf_quiet("JEVIN namesend %ld", printed);
+}
+
+/* ---------- riding: getting him into the player's vehicle ---------- */
+
+/* `jevin_seat <unit>`: whether this unit is sitting in something, and in which
+vehicle. The harness needs both - "is he riding" decides whether the body may be
+driven at all, and "which vehicle" is what `jevin_board` targets. */
+static void jevin_telemetry_seat(
+	long unit_index)
+{
+	struct object_datum *object = object_try_and_get(unit_index);
+	struct unit_datum *unit;
+	long parent;
+	long seat = NONE;
+
+	if (object == NULL)
+	{
+		jevin_printf_quiet("JEVIN seat %ld missing missing", unit_index);
+		return;
+	}
+	parent = object->object.parent_object_index;
+	unit = unit_try_and_get(unit_index);
+	if (unit != NULL && parent != NONE)
+		seat = unit->unit.parent_seat_index;
+	jevin_printf_quiet("JEVIN seat %ld %ld %ld", unit_index, parent, seat);
+}
+
+/* `jevin_riding`: the vehicle the player is riding, or NONE. A player in a
+warthog is a biped inside a seat, so the thing worth reporting is its ultimate
+parent. */
+static void jevin_telemetry_riding(void)
+{
+	long player_index = jevin_telemetry_player_unit();
+	long vehicle = NONE;
+
+	if (player_index != NONE)
+	{
+		vehicle = object_get_ultimate_parent(player_index);
+		/* `object_get_ultimate_parent` answers with the object itself when it
+		has no parent, so an unparented player reported his own index as the
+		vehicle he was riding - which is not a vehicle at all */
+		if (vehicle == player_index)
+			vehicle = NONE;
+	}
+	jevin_printf_quiet("JEVIN riding %ld %ld", player_index, vehicle);
+}
+
+/* `jevin_board <unit> <vehicle>`: put the unit in the first seat of that vehicle
+that its own seat labels allow and that is free.
+
+The engine's own script function takes a *seat label* ("warthog_p" and so on),
+so the seats are walked in order and each label is tried: the first one that
+actually parents the unit is the answer, and it is reported so the harness knows
+he is riding. */
+static void jevin_telemetry_board(
+	long unit_index,
+	long vehicle_index)
+{
+	struct unit_datum *unit = unit_try_and_get(unit_index);
+	struct unit_datum *vehicle = unit_try_and_get(vehicle_index);
+	struct unit_definition *definition;
+	short seat;
+
+	if (unit == NULL || vehicle == NULL)
+	{
+		jevin_printf_quiet("JEVIN board missing %ld %ld", unit_index, vehicle_index);
+		return;
+	}
+	if (object_get_type(vehicle_index) != _object_type_vehicle)
+	{
+		jevin_printf_quiet("JEVIN board not_vehicle %ld", vehicle_index);
+		return;
+	}
+	if (unit->object.parent_object_index == vehicle_index)
+	{
+		jevin_printf_quiet("JEVIN board already %ld %ld", unit_index,
+			(long)unit->unit.parent_seat_index);
+		return;
+	}
+	definition = unit_definition_get(vehicle->definition_index);
+	for (seat = 0; definition != NULL && seat < definition->unit.seats.count; ++seat)
+	{
+		struct unit_seat *element = TAG_BLOCK_GET_ELEMENT(&definition->unit.seats,
+			seat, struct unit_seat);
+
+		if (element == NULL || element->label[0] == '\0')
+			continue;
+		unit_scripting_enter_vehicle(unit_index, vehicle_index, element->label);
+		if (unit->object.parent_object_index == vehicle_index)
+		{
+			jevin_printf_quiet("JEVIN board %ld %ld %ld %s", unit_index,
+				vehicle_index, (long)unit->unit.parent_seat_index,
+				element->label);
+			return;
+		}
+	}
+	jevin_printf_quiet("JEVIN board failed %ld %ld", unit_index, vehicle_index);
 }
 
 /* goddamn hand-written helper: bring him to the player, alive or dead.
@@ -2898,6 +3033,44 @@ boolean jevin_console_command(
 	if ((rest = jevin_telemetry_word(expression, "jevin_recall")) != NULL)
 	{
 		jevin_telemetry_recall();
+		jevin_printf_quiet("JEVIN ok");
+		return TRUE;
+	}
+	if ((rest = jevin_telemetry_word(expression, "jevin_names")) != NULL)
+	{
+		char const *prefix = NULL;
+
+		if (rest != NULL && *rest != '\0')
+			prefix = rest;
+		jevin_telemetry_names(prefix);
+		jevin_printf_quiet("JEVIN ok");
+		return TRUE;
+	}
+	if ((rest = jevin_telemetry_word(expression, "jevin_seat")) != NULL)
+	{
+		long unit_index = NONE;
+
+		if (jevin_telemetry_long(&rest, &unit_index))
+			jevin_telemetry_seat(unit_index);
+		jevin_printf_quiet("JEVIN ok");
+		return TRUE;
+	}
+	if ((rest = jevin_telemetry_word(expression, "jevin_riding")) != NULL)
+	{
+		jevin_telemetry_riding();
+		jevin_printf_quiet("JEVIN ok");
+		return TRUE;
+	}
+	if ((rest = jevin_telemetry_word(expression, "jevin_board")) != NULL)
+	{
+		long unit_index = NONE;
+		long vehicle_index = NONE;
+
+		if (jevin_telemetry_long(&rest, &unit_index) &&
+			jevin_telemetry_long(&rest, &vehicle_index))
+			jevin_telemetry_board(unit_index, vehicle_index);
+		else
+			console_printf(FALSE, "JEVIN: jevin_board <unit> <vehicle>");
 		jevin_printf_quiet("JEVIN ok");
 		return TRUE;
 	}

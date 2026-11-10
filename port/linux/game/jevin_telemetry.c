@@ -497,6 +497,90 @@ static void jevin_telemetry_position_of(
 	*position = object->object.position;
 }
 
+/* whether a body wears the harness's violet, within a hair of it */
+static boolean jevin_telemetry_is_violet(
+	struct object_datum *object,
+	real red, real green, real blue)
+{
+	long slot;
+
+	for (slot = 0; slot < NUMBER_OF_OBJECT_CHANGE_COLORS; slot++)
+	{
+		real_point3d *colour = &object->object.base_change_colors[slot];
+		real dr = colour->n[0] - red;
+		real dg = colour->n[1] - green;
+		real db = colour->n[2] - blue;
+
+		if (dr < 0.0f)
+			dr = -dr;
+		if (dg < 0.0f)
+			dg = -dg;
+		if (db < 0.0f)
+			db = -db;
+		if (dr < 0.01f && dg < 0.01f && db < 0.01f)
+			return TRUE;
+	}
+	return FALSE;
+}
+
+/* `jevin_sweep [unit]`: leave exactly one Jevin in the world.
+
+Two bodies of the same squadmate is not a cosmetic problem: the harness drives
+the one whose index it holds, the other stands where it was left and keeps
+shooting, and either of them can be the one the player revives. So this deletes
+every biped that carries his colour - the violet `jevin_color` sets, which
+nothing else in the game uses - except the one to keep, and it reports how many
+it removed. A body is recognised by its colour rather than by its index because
+the point of the sweep is that the indices are already out of hand.
+
+With no argument the keeper is the unit under remote control.
+*/
+static void jevin_telemetry_sweep(
+	long keep_index)
+{
+	struct object_iterator iterator;
+	long removed = 0;
+	long kept = NONE;
+	long scanned = 0;
+	real red;
+	real green;
+	real blue;
+
+	if (keep_index == NONE)
+		keep_index = jevin_remote_unit;
+	/* the colour the harness paints him (`VIOLET` in agent_config.py): every
+	body it has ever made wears it, and nothing else in the game does */
+	red = 0.467f;
+	green = 0.380f;
+	blue = 0.955f;
+
+	object_iterator_new(&iterator, FLAG(_object_type_biped), 0);
+	while (scanned++ < 64)
+	{
+		struct object_datum *object = object_iterator_next(&iterator);
+		long index;
+
+		if (object == NULL)
+			break;
+		index = iterator.index;
+		if (object->object.type != _object_type_biped)
+			continue;
+		if (index == keep_index)
+		{
+			kept = index;
+			continue;
+		}
+		if (!jevin_telemetry_is_violet(object, red, green, blue))
+			continue;
+		object_delete(index);
+		removed++;
+		jevin_printf_quiet("JEVIN sweep removed %ld", index);
+	}
+	if (keep_index != NONE && object_try_and_get(keep_index) != NULL)
+		kept = keep_index;
+	jevin_printf_quiet("JEVIN sweep %ld %ld", removed, kept);
+}
+
 /* ---------- riding: getting him into the player's vehicle ---------- */
 
 /* `jevin_seat <unit>`: whether this unit is sitting in something, and in which
@@ -3166,6 +3250,17 @@ boolean jevin_console_command(
 	if ((rest = jevin_telemetry_word(expression, "jevin_recall")) != NULL)
 	{
 		jevin_telemetry_recall();
+		jevin_printf_quiet("JEVIN ok");
+		return TRUE;
+	}
+	if ((rest = jevin_telemetry_word(expression, "jevin_sweep")) != NULL)
+	{
+		long keep_index = NONE;
+
+		if (jevin_telemetry_long(&rest, &keep_index))
+			jevin_telemetry_sweep(keep_index);
+		else
+			jevin_telemetry_sweep(NONE);
 		jevin_printf_quiet("JEVIN ok");
 		return TRUE;
 	}

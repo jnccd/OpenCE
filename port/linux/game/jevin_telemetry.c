@@ -583,6 +583,55 @@ static void jevin_telemetry_sweep(
 
 /* ---------- riding: getting him into the player's vehicle ---------- */
 
+/* the label of a seat on a unit's own model: "warthog_d", "warthog_p" ... */
+static char const *jevin_telemetry_seat_label(
+	long definition_index,
+	long seat_index)
+{
+	struct unit_definition *definition = unit_definition_get(definition_index);
+	struct unit_seat *element;
+
+	if (definition == NULL || seat_index < 0 ||
+		seat_index >= definition->unit.seats.count)
+		return "";
+	element = TAG_BLOCK_GET_ELEMENT(&definition->unit.seats, seat_index,
+		struct unit_seat);
+	if (element == NULL)
+		return "";
+	return element->label;
+}
+
+/* whether a seat is the one that drives: the driver cannot shoot, so it is the
+one seat a harness-driven squadmate should never take */
+static boolean jevin_telemetry_seat_is_driver(
+	char const *label)
+{
+	static char const *word = "driver";
+	long length = (long)csstrlen(label);
+	long index;
+
+	if (length < 6)
+		return FALSE;
+	/* the label is "W-driver" in this level's warthog, and "_d" in others: the
+	word inside it is the reliable thing, which is why this looks for it
+	anywhere rather than only at the end */
+	for (index = 0; index + 6 <= length; ++index)
+	{
+		char a = label[index];
+		char b = label[index + 1];
+		char c = label[index + 2];
+		char d = label[index + 3];
+		char e = label[index + 4];
+		char f = label[index + 5];
+
+		if ((a == 'd' || a == 'D') && (b == 'r' || b == 'R') &&
+			(c == 'i' || c == 'I') && (d == 'v' || d == 'V') &&
+			(e == 'e' || e == 'E') && (f == 'r' || f == 'R'))
+			return TRUE;
+	}
+	return FALSE;
+}
+
 /* `jevin_seat <unit>`: whether this unit is sitting in something, and in which
 vehicle. The harness needs both - "is he riding" decides whether the body may be
 driven at all, and "which vehicle" is what `jevin_board` targets. */
@@ -603,7 +652,21 @@ static void jevin_telemetry_seat(
 	unit = unit_try_and_get(unit_index);
 	if (unit != NULL && parent != NONE)
 		seat = unit->unit.parent_seat_index;
-	jevin_printf_quiet("JEVIN seat %ld %ld %ld", unit_index, parent, seat);
+	/* the label says where he is sitting: a squadmate belongs in a passenger or
+	gunner seat, and a driver's seat is not a place he can do anything from */
+	{
+		char const *label = "";
+		struct object_datum *vehicle = parent != NONE
+			? object_try_and_get(parent) : NULL;
+
+		/* the seat index is an index into the *vehicle's* seats: asking the
+		occupant for it answered an empty label, which made every seat look alike
+		and let him take the driver's */
+		if (vehicle != NULL && seat != NONE)
+			label = jevin_telemetry_seat_label(vehicle->definition_index, seat);
+		jevin_printf_quiet("JEVIN seat %ld %ld %ld %s", unit_index, parent, seat,
+			label);
+	}
 }
 
 /* `jevin_riding`: the vehicle the player is riding, or NONE. A player in a
@@ -659,23 +722,72 @@ static void jevin_telemetry_board(
 		return;
 	}
 	definition = unit_definition_get(vehicle->definition_index);
-	for (seat = 0; definition != NULL && seat < definition->unit.seats.count; ++seat)
+	/* two passes: every seat that is not the driver's first, the driver's seat
+	only if there is nothing else. Measured, the first seat of a warthog is the
+	driver's, and he took it - a squadmate who cannot drive, sitting in the
+	driver's seat, is a squadmate the player has to get out of it by hand. */
 	{
-		struct unit_seat *element = TAG_BLOCK_GET_ELEMENT(&definition->unit.seats,
-			seat, struct unit_seat);
+		long pass;
 
-		if (element == NULL || element->label[0] == '\0')
-			continue;
-		unit_scripting_enter_vehicle(unit_index, vehicle_index, element->label);
-		if (unit->object.parent_object_index == vehicle_index)
+		for (pass = 0; pass < 2; ++pass)
 		{
-			jevin_printf_quiet("JEVIN board %ld %ld %ld %s", unit_index,
-				vehicle_index, (long)unit->unit.parent_seat_index,
-				element->label);
-			return;
+			for (seat = 0; definition != NULL &&
+				seat < definition->unit.seats.count; ++seat)
+			{
+				struct unit_seat *element = TAG_BLOCK_GET_ELEMENT(
+					&definition->unit.seats, seat, struct unit_seat);
+				boolean driver;
+
+				if (element == NULL || element->label[0] == '\0')
+					continue;
+				driver = jevin_telemetry_seat_is_driver(element->label);
+				if (pass == 0 && driver)
+					continue;
+				if (pass == 1 && !driver)
+					continue;
+				unit_scripting_enter_vehicle(unit_index, vehicle_index,
+					element->label);
+				if (unit->object.parent_object_index == vehicle_index)
+				{
+					jevin_printf_quiet("JEVIN board %ld %ld %ld %s", unit_index,
+						vehicle_index, (long)unit->unit.parent_seat_index,
+						element->label);
+					return;
+				}
+			}
 		}
 	}
 	jevin_printf_quiet("JEVIN board failed %ld %ld", unit_index, vehicle_index);
+}
+
+/* `jevin_unboard <unit>`: get out of whatever he is sitting in.
+
+He cannot drive, so a body of his left in a seat is a body the player has to go
+back for. The engine's own seat-exit handles the animation and the placement.
+*/
+static void jevin_telemetry_unboard(
+	long unit_index)
+{
+	struct unit_datum *unit = unit_try_and_get(unit_index);
+	long parent;
+
+	if (unit == NULL)
+	{
+		jevin_printf_quiet("JEVIN unboard missing %ld", unit_index);
+		return;
+	}
+	parent = unit->object.parent_object_index;
+	if (parent == NONE)
+	{
+		jevin_printf_quiet("JEVIN unboard none %ld", unit_index);
+		return;
+	}
+	if (!unit_try_and_exit_seat(unit_index))
+	{
+		jevin_printf_quiet("JEVIN unboard refused %ld", unit_index);
+		return;
+	}
+	jevin_printf_quiet("JEVIN unboard %ld %ld", unit_index, parent);
 }
 
 /* goddamn hand-written helper: bring him to the player, alive or dead.
@@ -3250,6 +3362,17 @@ boolean jevin_console_command(
 	if ((rest = jevin_telemetry_word(expression, "jevin_recall")) != NULL)
 	{
 		jevin_telemetry_recall();
+		jevin_printf_quiet("JEVIN ok");
+		return TRUE;
+	}
+	if ((rest = jevin_telemetry_word(expression, "jevin_unboard")) != NULL)
+	{
+		long unit_index = NONE;
+
+		if (jevin_telemetry_long(&rest, &unit_index))
+			jevin_telemetry_unboard(unit_index);
+		else
+			console_printf(FALSE, "JEVIN: jevin_unboard <unit>");
 		jevin_printf_quiet("JEVIN ok");
 		return TRUE;
 	}

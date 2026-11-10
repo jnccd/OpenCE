@@ -68,6 +68,16 @@ int config_boolean(char const *name);
 control state because `pos` reports it, and that command is defined above. */
 static long jevin_remote_unit = NONE;
 
+/* defined with the rest of the control state, which is below `recall` */
+static boolean jevin_remote_begin(
+	long unit_index);
+
+/* and the spawn helper, which `recall` uses when he is dead */
+static long jevin_telemetry_spawn(
+	long template_index,
+	boolean at_point,
+	real x, real y, real z);
+
 /* port: whether this run wants cutscenes skipped as they start.
 
 A test harness cannot press a key, and injecting seven space presses was the
@@ -330,6 +340,68 @@ static void jevin_telemetry_pos(
 			companion != NULL ? (double)companion->object.position.n[0] : 0.0,
 			companion != NULL ? (double)companion->object.position.n[1] : 0.0,
 			companion != NULL ? (double)companion->object.position.n[2] : 0.0);
+		ring[NUMBEROF(ring) - 2] = '\0';
+		jevin_telemetry_order(ring);
+	}
+}
+
+/* goddamn hand-written helper: bring him to the player, alive or dead.
+
+Typing `jevin_recall` in the game is the rescue: if he is up, he is moved to a
+walkable spot beside the player; if he is down, the corpse is deleted and a fresh
+body is spawned at the player's side, which is what the revive does with a press
+of the action button. It exists because a person playing does not want to walk
+back for a squadmate who fell off a bridge - and because the harness needs a way
+out of "he is somewhere unhelpful" during a long session. */
+static void jevin_telemetry_recall(
+	void)
+{
+	long player_index = jevin_telemetry_player_unit();
+	struct object_datum *player;
+	struct object_datum *companion;
+	long new_index = NONE;
+	long index;
+
+	if (player_index == NONE || (player = object_try_and_get(player_index)) == NULL)
+	{
+		jevin_printf_quiet("JEVIN recall no_player");
+		return;
+	}
+	companion = jevin_remote_unit != NONE ? object_try_and_get(jevin_remote_unit) : NULL;
+	/* two and a half units to his right, which is out of the way of a doorway */
+	index = companion != NULL ? jevin_remote_unit : NONE;
+	if (index != NONE && companion->object.body_vitality > 0.0f)
+	{
+		real_point3d point;
+
+		/* two units ahead of the player, which is where the spawn puts a body too:
+		the object has a forward and an up, not a right, so a sideways offset
+		would have to be a cross product for no gain */
+		point.n[0] = player->object.position.n[0] + player->object.forward.n[0] * 2.0f;
+		point.n[1] = player->object.position.n[1] + player->object.forward.n[1] * 2.0f;
+		point.n[2] = player->object.position.n[2] + player->object.forward.n[2] * 2.0f;
+		jevin_telemetry_teleport(index, NONE, point.n[0], point.n[1], point.n[2]);
+		jevin_printf_quiet("JEVIN recall alive %ld", index);
+	}
+	else
+	{
+		if (index != NONE)
+			object_delete(index);       /* the corpse is not left behind */
+		new_index = jevin_telemetry_spawn(player_index, FALSE, 0.0f, 0.0f, 0.0f);
+		if (new_index == NONE)
+		{
+			jevin_printf_quiet("JEVIN recall failed");
+			return;
+		}
+		jevin_remote_begin(new_index);
+		jevin_printf_quiet("JEVIN recall spawned %ld", new_index);
+	}
+	{
+		char ring[96];
+
+		_snprintf(ring, NUMBEROF(ring) - 2, "recall %ld %s",
+			new_index != NONE ? new_index : index,
+			new_index != NONE ? "spawned" : "alive");
 		ring[NUMBEROF(ring) - 2] = '\0';
 		jevin_telemetry_order(ring);
 	}
@@ -2807,6 +2879,12 @@ boolean jevin_console_command(
 		else
 			console_printf(FALSE,
 				"JEVIN: jevin_revive <corpse_unit> <player_unit> [radius]");
+		jevin_printf_quiet("JEVIN ok");
+		return TRUE;
+	}
+	if ((rest = jevin_telemetry_word(expression, "jevin_recall")) != NULL)
+	{
+		jevin_telemetry_recall();
 		jevin_printf_quiet("JEVIN ok");
 		return TRUE;
 	}

@@ -1609,8 +1609,15 @@ static void jevin_telemetry_los(
 	real_point3d point;
 	real_vector3d direction;
 	real length;
-	unsigned long flags = _collision_test_for_projectiles_flags;
-
+	/* A bullet's own flags, plus scenery. `_collision_test_for_projectiles_flags`
+	is 0x1000E9: structure, objects, bipeds, vehicles - and *not* the scenery
+	type bit, so a boulder built as scenery is invisible to this and the answer
+	came back "clear" while every round went into the rock. */
+	unsigned long flags = _collision_test_for_projectiles_flags |
+		FLAG(_collision_test_objects_scenery_bit) |
+		FLAG(_collision_test_objects_machines_bit) |
+		FLAG(_collision_test_objects_controls_bit) |
+		FLAG(_collision_test_objects_light_fixtures_bit);
 	point.n[0] = ax;
 	point.n[1] = ay;
 	point.n[2] = az;

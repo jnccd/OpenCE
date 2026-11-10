@@ -313,14 +313,20 @@ static void jevin_telemetry_pos(
 
 	/* and the same answer down the order ring, so the process running the harness
 	prints it too: numbers that exist only on the screen have to be screenshotted,
-	and numbers in a terminal can be pasted. */
+	and numbers in a terminal can be pasted. The eye goes with them - the terminal
+	line is what a person copies into a report, and the point a sightline starts
+	from is the number that report is for. */
 	{
-		char ring[128];
+		char ring[160];
+		real_point3d eye;
 
-		_snprintf(ring, NUMBEROF(ring) - 2, "pos %.2f %.2f %.2f %.2f %.2f %.2f",
+		unit_get_camera_position(unit_index, &eye);
+		_snprintf(ring, NUMBEROF(ring) - 2,
+			"pos %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f",
 			(double)object->object.position.n[0],
 			(double)object->object.position.n[1],
 			(double)object->object.position.n[2],
+			(double)eye.n[0], (double)eye.n[1], (double)eye.n[2],
 			companion != NULL ? (double)companion->object.position.n[0] : 0.0,
 			companion != NULL ? (double)companion->object.position.n[1] : 0.0,
 			companion != NULL ? (double)companion->object.position.n[2] : 0.0);

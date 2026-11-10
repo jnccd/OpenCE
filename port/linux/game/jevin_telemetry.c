@@ -52,6 +52,8 @@ does its own geometry, which keeps this a dump rather than a query.
 #include "unit_control_data.h"
 #include "units/units.h"
 #include "units/unit_definitions.h"
+#include "units/vehicles.h"
+#include "hs/hs_library_external.h"
 #include "interface/terminal.h"
 #include "networking/telnet_console.h"
 #include "jevin_telemetry.h"
@@ -381,6 +383,90 @@ static void jevin_telemetry_names(
 			break;
 	}
 	jevin_printf_quiet("JEVIN namesend %ld", printed);
+}
+
+/* `jevin_hog [distance]`: a warthog, right in front of the player.
+
+Typing `object_create jeep` in the console works, but it puts the warthog where
+the level's scenario placed it - which is usually the far side of the map from
+the drop pod, and no use for testing the vehicle behaviour as it comes up. This
+creates one if the level has not already, and moves it to a spot just ahead of
+the player, so a person testing a session has a vehicle where they are standing.
+It reports the object index so the harness can address it.
+*/
+static void jevin_telemetry_hog(
+	real distance)
+{
+	struct scenario *scenario = global_scenario_get();
+	struct unit_datum *player_unit;
+	struct object_datum *player;
+	long player_index = jevin_telemetry_player_unit();
+	long name_index = NONE;
+	long object_index = NONE;
+	long index;
+	struct location location;
+	real_point3d position;
+
+	if (scenario == NULL)
+	{
+		jevin_printf_quiet("JEVIN hog no_scenario");
+		return;
+	}
+	/* the level's own name for its warthog: a30 calls it jeep, others call it
+	warthog or warthog_1, so a prefix of either is enough */
+	for (index = 0; index < scenario->object_names.count; ++index)
+	{
+		struct scenario_object_name *name = TAG_BLOCK_GET_ELEMENT(
+			&scenario->object_names, index, struct scenario_object_name);
+
+		if (name == NULL || name->runtime_object_type !=
+			_object_type_vehicle)
+			continue;
+		if (_strnicmp(name->name, "jeep", 4) == 0 ||
+			_strnicmp(name->name, "warthog", 7) == 0)
+		{
+			name_index = index;
+			break;
+		}
+	}
+	if (name_index == NONE)
+	{
+		jevin_printf_quiet("JEVIN hog no_name");
+		return;
+	}
+	object_index = object_index_from_name_index(name_index);
+	if (object_index == NONE)
+	{
+		object_new_by_name(name_index);
+		object_index = object_index_from_name_index(name_index);
+	}
+	if (object_index == NONE)
+	{
+		jevin_printf_quiet("JEVIN hog create_failed %ld", name_index);
+		return;
+	}
+	if (distance <= 0.0f)
+		distance = 3.5f;
+	if (player_index == NONE ||
+		(player = object_try_and_get(player_index)) == NULL)
+	{
+		jevin_printf_quiet("JEVIN hog created %ld", object_index);
+		return;
+	}
+	player_unit = unit_try_and_get(player_index);
+	position.n[0] = player->object.position.n[0] + player->object.forward.n[0] * distance;
+	position.n[1] = player->object.position.n[1] + player->object.forward.n[1] * distance;
+	position.n[2] = player->object.position.n[2] + player->object.forward.n[2] * distance;
+	scenario_location_from_point(&location, &position);
+	if (location.cluster_index == NONE)
+	{
+		jevin_printf_quiet("JEVIN hog created %ld outside", object_index);
+		return;
+	}
+	object_translate(object_index, &position, &location);
+	jevin_printf_quiet("JEVIN hog %ld %.3f %.3f %.3f", object_index,
+		(double)position.n[0], (double)position.n[1], (double)position.n[2]);
+	(void)player_unit;
 }
 
 /* ---------- riding: getting him into the player's vehicle ---------- */
@@ -3033,6 +3119,17 @@ boolean jevin_console_command(
 	if ((rest = jevin_telemetry_word(expression, "jevin_recall")) != NULL)
 	{
 		jevin_telemetry_recall();
+		jevin_printf_quiet("JEVIN ok");
+		return TRUE;
+	}
+	if ((rest = jevin_telemetry_word(expression, "jevin_hog")) != NULL)
+	{
+		real distance = 0.0f;
+
+		if (jevin_telemetry_real(&rest, &distance))
+			jevin_telemetry_hog(distance);
+		else
+			jevin_telemetry_hog(0.0f);
 		jevin_printf_quiet("JEVIN ok");
 		return TRUE;
 	}
